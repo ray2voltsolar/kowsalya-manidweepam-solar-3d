@@ -476,3 +476,50 @@ details.disc ul { margin: 6px 0 0; padding-left: 17px; line-height: 1.45; }
   #infocard { top: auto; bottom: calc(var(--sheet-h) + 60px); }
   body.panel-collapsed #infocard { bottom: 128px; }
 }
+
+/* ---------------- Title card and bottom controls can be put away ---------------- */
+#brand {
+  padding-right: 42px; transform-origin: 100% 0;
+  transition: transform .3s cubic-bezier(.2, .8, .2, 1), opacity .2s ease, visibility .3s;
+}
+.card-x {
+  position: absolute; top: 6px; right: 6px; width: 32px; height: 32px; display: grid; place-items: center;
+  background: none; border: 0; border-radius: 8px; color: var(--muted);
+}
+.card-x:hover { color: var(--text); background: rgba(255, 255, 255, .08); }
+body.brand-collapsed #brand { transform: translateX(36px) scale(.92); opacity: 0; visibility: hidden; pointer-events: none; }
+.chip-open {
+  position: fixed; z-index: 11; display: none; align-items: center; justify-content: center; gap: 6px;
+  min-width: 40px; height: 40px; padding: 0 11px; color: var(--text); border-radius: 11px; font-size: 12px; font-weight: 550;
+}
+.chip-open:hover { background: var(--glass-strong); }
+/* the title card tucks away to the right, next to the compass */
+#brandOpen { top: calc(var(--gap) + 16px); right: calc(var(--panel-w) + 2 * var(--gap) + 72px + 8px); transition: right .35s cubic-bezier(.2, .8, .2, 1); }
+body.panel-collapsed #brandOpen { right: calc(var(--gap) + 96px + 72px + 8px); }
+body.brand-collapsed #brandOpen { display: flex; }
+/* the view bar slides down out of the picture; a small button on the right brings it back */
+#viewbar { transition: transform .35s cubic-bezier(.2, .8, .2, 1), max-width .35s, translate .3s ease, opacity .2s ease, visibility .3s; }
+#viewbar .vb-hide { position: sticky; right: 0; margin-left: 2px; padding: 7px 8px; background: rgba(21, 28, 34, .97); color: var(--muted); }
+#viewbar .vb-hide:hover { background: rgba(40, 50, 60, .98); color: var(--text); }
+body.bottom-hidden #viewbar { translate: 0 calc(100% + 48px); opacity: 0; visibility: hidden; pointer-events: none; }
+#bottomOpen { bottom: 26px; right: calc(var(--panel-w) + 2 * var(--gap)); transition: right .35s cubic-bezier(.2, .8, .2, 1); }
+body.panel-collapsed #bottomOpen { right: var(--gap); }
+body.bottom-hidden #bottomOpen { display: flex; }
+
+@media (max-width: 760px) {
+  #brandOpen, body.panel-collapsed #brandOpen { top: calc(var(--gap) + 10px); right: calc(var(--gap) + 60px + 8px); }
+  /* the chevron in the tab row puts the whole bottom sheet away */
+  .tabs .tab-collapse { display: flex; flex: 0 0 44px; }
+  .tabs .tab-collapse .ic { transform: rotate(90deg); }
+  body.bottom-hidden #panel, body.bottom-hidden #panel.collapsed { transform: translateY(calc(100% + 12px)); visibility: hidden; transition: transform .35s cubic-bezier(.2, .8, .2, 1), visibility .35s; }
+  #bottomOpen, body.panel-collapsed #bottomOpen { right: var(--gap); bottom: calc(10px + env(safe-area-inset-bottom)); height: 44px; }
+  body.bottom-hidden #scalebar, body.bottom-hidden.panel-collapsed #scalebar { bottom: calc(64px + env(safe-area-inset-bottom)); }
+  body.bottom-hidden #legendFloat, body.bottom-hidden.panel-collapsed #legendFloat { bottom: calc(64px + env(safe-area-inset-bottom)) !important; }
+  body.bottom-hidden #attrib, body.bottom-hidden.panel-collapsed #attrib { bottom: calc(6px + env(safe-area-inset-bottom)); right: 120px; text-align: left; }
+  body.bottom-hidden #infocard, body.bottom-hidden.panel-collapsed #infocard { bottom: 68px; }
+}
+@media (max-height: 500px) and (orientation: landscape) and (min-width: 761px) {
+  #brandOpen { top: calc(var(--gap) + 7px); right: calc(var(--panel-w) + 2 * var(--gap) + 54px + 8px); }
+  body.panel-collapsed #brandOpen { right: calc(var(--gap) + 92px + 54px + 8px); }
+  #bottomOpen { bottom: 18px; }
+}

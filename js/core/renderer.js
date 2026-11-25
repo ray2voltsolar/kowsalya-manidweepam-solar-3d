@@ -42,8 +42,8 @@ THREE.ShaderChunk.shadowmap_pars_fragment = shadowChunk.replace('if ( frustumTes
 export const QUALITY = {
   ultra:  { label: 'Ultra',  pixelRatio: 2,   shadow: 8192, gtao: true,  bloom: true,  aa: 'smaa' },
   high:   { label: 'High',   pixelRatio: 2,   shadow: 4096, gtao: true,  bloom: true,  aa: 'smaa' },
-  medium: { label: 'Medium', pixelRatio: 1.5, shadow: 2048, gtao: false, bloom: true,  aa: 'smaa' },
-  low:    { label: 'Low',    pixelRatio: 1,   shadow: 1024, gtao: false, bloom: false, aa: 'fxaa' },
+  medium: { label: 'Medium', pixelRatio: 2,   shadow: 2048, gtao: false, bloom: true,  aa: 'smaa' },
+  low:    { label: 'Low',    pixelRatio: 2,   shadow: 1024, gtao: false, bloom: false, aa: 'smaa' },
 };
 
 const GradeShader = {

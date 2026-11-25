@@ -46,7 +46,8 @@ export function createUI({ site, summary, views, handlers }) {
   $('.ld-sub').textContent = P.systemLabel;
   $('.ld-by b').textContent = P.preparedBy;
   document.title = `${P.customer} · ${P.systemLabel}`;
-  const syncHeaderHeight = () => document.body.style.setProperty('--card-top', `${$('#brand').getBoundingClientRect().bottom + 10}px`);
+  const syncHeaderHeight = () => document.body.style.setProperty('--card-top',
+    document.body.classList.contains('brand-collapsed') ? '72px' : `${$('#brand').getBoundingClientRect().bottom + 10}px`);
   syncHeaderHeight();
   new ResizeObserver(syncHeaderHeight).observe($('#brand'));
 
@@ -90,7 +91,35 @@ export function createUI({ site, summary, views, handlers }) {
     setTab(b.dataset.tab);
   }));
   ui.activeTab = 'summary';
-  $('#panelCollapse').addEventListener('click', () => setCollapsed(true));
+  // The title card and the bottom controls can each be put away; the choice is remembered on this device.
+  const pref = {
+    get: (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } },
+    set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* private mode */ } },
+  };
+  function setBrandCollapsed(c, persist = true) {
+    document.body.classList.toggle('brand-collapsed', c);
+    $('#brand').inert = c;
+    if (persist) pref.set('r2v.card', c ? 'hidden' : 'shown');
+    syncHeaderHeight();
+  }
+  function setBottomHidden(h, persist = true) {
+    document.body.classList.toggle('bottom-hidden', h);
+    $('#viewbar').inert = h;
+    panel.inert = h && isPhone();
+    if (persist) pref.set('r2v.bottom', h ? 'hidden' : 'shown');
+    H.onPanelChange && H.onPanelChange();
+  }
+  ui.setBrandCollapsed = setBrandCollapsed;
+  ui.setBottomHidden = setBottomHidden;
+  ui.isBottomHidden = () => document.body.classList.contains('bottom-hidden');
+  $('#brandCollapse').addEventListener('click', () => setBrandCollapsed(true));
+  $('#brandOpen').addEventListener('click', () => setBrandCollapsed(false));
+  $('#bottomOpen').addEventListener('click', () => setBottomHidden(false));
+  // phones start with the title card put away so the model has the screen
+  { const saved = pref.get('r2v.card'); setBrandCollapsed(saved ? saved === 'hidden' : isPhone(), false); }
+  if (pref.get('r2v.bottom') === 'hidden') setBottomHidden(true, false);
+  // desktop: the chevron slides the side panel away to the right; phone: it puts the whole bottom sheet away
+  $('#panelCollapse').addEventListener('click', () => (isPhone() ? setBottomHidden(true) : setCollapsed(true)));
   $('#panelOpen').addEventListener('click', () => setCollapsed(false));
   $('#sheetGrip').addEventListener('click', () => setCollapsed(!ui.isCollapsed()));
   ui.togglePanel = () => setCollapsed(!ui.isCollapsed());
@@ -106,7 +135,7 @@ export function createUI({ site, summary, views, handlers }) {
   // camera recentres the model in the visible area above it (computed from the CSS, not the
   // animating rect, so it is correct immediately after a toggle).
   ui.panelOffsetY = () => {
-    if (!isPhone() || document.body.classList.contains('clean')) return 0;
+    if (!isPhone() || document.body.classList.contains('clean') || document.body.classList.contains('bottom-hidden')) return 0;
     const sheet = ui.isCollapsed() ? 64 : 0.56 * innerHeight;
     const vb = $('#viewbar'); const vbh = vb ? (vb.getBoundingClientRect().height || 44) : 44;
     return Math.max(0, Math.min(innerHeight * 0.7, sheet + vbh + 12));
@@ -312,9 +341,11 @@ export function createUI({ site, summary, views, handlers }) {
       ${item('road')}${item('gate')}${item('terrace')}${item('inverter')}
       <span class="sep"></span>
       ${item('drone')}
+      <button class="vb vb-hide" id="vbHide" title="Hide this bar" aria-label="Hide the view bar"><svg viewBox="0 0 24 24" class="ic"><path d="m6 9 6 6 6-6"/></svg></button>
     `;
     $$('#viewbar [data-view]').forEach((b) => b.addEventListener('click', () => H.onView(b.dataset.view)));
     $('#vbMode').addEventListener('click', () => H.onMode('toggle'));
+    $('#vbHide').addEventListener('click', () => setBottomHidden(true));
   }
   ui.setActiveView = (name) => {
     $$('[data-view]').forEach((b) => b.classList.toggle('on', b.dataset.view === (views[name]?.alias || name)));

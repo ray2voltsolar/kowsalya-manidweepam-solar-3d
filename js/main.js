@@ -89,7 +89,7 @@ async function boot() {
   let resScale = 1, motionScale = 1;
   let ambientSlow = false, lastWasAmbient = false; // ambient animation is skipped where full-res frames are expensive
   const basePixelRatio = () => Math.min(devicePixelRatio || 1, QUALITY[quality].pixelRatio);
-  const minMotionScale = () => Math.min(1, 0.6 / basePixelRatio());
+  const minMotionScale = () => Math.min(1, Math.max(0.7, 1 / basePixelRatio()));
   function setResScale(sc) {
     if (Math.abs(sc - resScale) < 0.02) return;
     resScale = sc; post.setSize(innerWidth, innerHeight, basePixelRatio() * sc);
