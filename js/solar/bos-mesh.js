@@ -22,7 +22,7 @@ export class Batch {
   face(pts,c,uv,normals){
     const k=this.positions.length/3,n=unit(cross(minus(pts[1],pts[0]),minus(pts[2],pts[0])));
     const axis=n.map(Math.abs).indexOf(Math.max(...n.map(Math.abs)));
-    pts.forEach((p,i)=>this.vertex(p,normals?.[i]||n,c,uv?.[i]||[p[axis===0?1:0]*5,p[axis===2?1:2]*5]));
+    pts.forEach((p,i)=>this.vertex(p,normals?.[i]||n,c,uv?.[i]||this.plainUV||[p[axis===0?1:0]*5,p[axis===2?1:2]*5]));
     for(let i=1;i<pts.length-1;i++)this.indices.push(k,k+i,k+i+1);
   }
   box(x,y,z,w,d,h,c,open=false){
@@ -97,7 +97,6 @@ export const material=(name,roughness,metalness,props={})=>new THREE.MeshStandar
 
 // Subtle grain breaks the perfectly even specular highlight on cast aluminium.
 export function powderFinish(ctx){
-  if(ctx.quality==='low')return material('Powder coated enclosures',.48,.15);
   const n=128,cv=document.createElement('canvas');cv.width=cv.height=n;
   const c=cv.getContext('2d'),im=c.createImageData(n,n),data=im.data;
   let seed=815;
@@ -108,6 +107,7 @@ export function powderFinish(ctx){
   }
   c.putImageData(im,0,0);
   const map=new THREE.CanvasTexture(cv);map.colorSpace=THREE.SRGBColorSpace;
+  map.anisotropy=Math.min(ctx.maxAnisotropy||1,16);
   map.wrapS=map.wrapT=THREE.RepeatWrapping;map.magFilter=THREE.LinearFilter;
   map.minFilter=THREE.LinearMipmapLinearFilter;map.generateMipmaps=true;map.needsUpdate=true;
   return material('Fine texture powder coat',.48,.16,{map});
@@ -127,9 +127,12 @@ const labels=[
   ['INV–04','STRING INVERTER',''],
   ['AC OUTPUT','POWER    /    GRID','ONLINE'],
 ];
-export function labelSheet(quality,aniso,inverters=[]){
-  const cellW=quality==='high'?512:256,cellH=cellW/3.2;
-  const cv=document.createElement('canvas');cv.width=cellW;cv.height=Math.ceil(cellH*labels.length);
+const sheets=new WeakMap();
+export function labelSheet(ctx){
+  if(sheets.has(ctx)) return sheets.get(ctx);
+  const inverters=ctx.site.INVERTERS, cellW=ctx.textureQuality==='high'?512:256;
+  const cellH=Math.min(cellW/3.2,2048/labels.length);
+  const cv=document.createElement('canvas');cv.width=cellW+16;cv.height=Math.ceil(cellH*labels.length);
   const c=cv.getContext('2d');
   labels.forEach(([a,b,d],i)=>{
     if(i>=8 && i<12){const inv=inverters[i-8];if(inv){a=inv.id;b=inv.kw+' kW   /   3 PHASE';d='GRID CONNECTED';}}
@@ -146,8 +149,17 @@ export function labelSheet(quality,aniso,inverters=[]){
     c.font='bold 24px Arial';c.fillText(b,x,100);c.font='19px monospace';c.fillText(d,x,133);
     c.restore();
   });
-  const map=new THREE.CanvasTexture(cv);map.colorSpace=THREE.SRGBColorSpace;map.anisotropy=Math.min(8,aniso||1);
-  return material('Screen printed equipment plates',.62,.07,{map});
+  // A white swatch lets phone equipment and legible plates share a draw call.
+  c.fillStyle='#fff'; c.fillRect(cellW,0,16,cv.height);
+  const map=new THREE.CanvasTexture(cv); map.repeat.x=cellW/cv.width;
+  map.colorSpace=THREE.SRGBColorSpace;map.anisotropy=Math.min(16,ctx.maxAnisotropy||1);
+  const sheet=material('Screen printed equipment plates',.62,.07,{map});
+  sheets.set(ctx,sheet); return sheet;
+}
+export function sharePlateMap(ctx,batch,baseMaterial) {
+  const map=labelSheet(ctx).map;
+  batch.plainUV=[(map.image.width-8)/(map.image.width-16),0.5];
+  baseMaterial.map=map;
 }
 export function plate(batch,id,x,y,z,w,h,south=false){
   const normal=Array.isArray(south)?south:[0,south?-1:1],v1=1-(id+.012)/labels.length,v0=1-(id+.988)/labels.length;

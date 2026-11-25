@@ -67,7 +67,7 @@ export function stationRack(site,s){
   throw Error('No supported equipment footprint for '+s.id);
 }
 
-function raster(site,stations) {
+function* raster(site,stations) {
   const rings = site.ROOF.polygons.flatMap(p => [p.outer, ...p.holes]);
   const points = rings.flat();
   const ox = Math.floor(Math.min(...points.map(p => p[0]))) - 1;
@@ -85,6 +85,7 @@ function raster(site,stations) {
   };
   // Even/odd scan conversion handles nested courtyards and both independent slabs.
   for(let j=0;j<h;j++){
+    if (!(j%16)) yield;
     const y=oy+j*STEP, cuts=[];
     for(const ring of rings) for(let i=0;i<ring.length;i++){
       const a=ring[i], b=ring[(i+1)%ring.length];
@@ -113,24 +114,31 @@ function raster(site,stations) {
   let count=0;
   for(let i=0;i<n;i++) if(clear[i]&&!component[i]){
     count++; let tail=1;queue[0]=i;component[i]=count;
-    for(let q=0;q<tail;q++) for(const d of dirs){
-      const j=queue[q]+d;
-      if(clear[j]&&!component[j]){component[j]=count;queue[tail++]=j;}
+    for(let q=0;q<tail;q++){
+      if (!(q%2048)) yield;
+      for(const d of dirs){
+        const j=queue[q]+d;
+        if(clear[j]&&!component[j]){component[j]=count;queue[tail++]=j;}
+      }
     }
   }
   // Sort candidate bracket spans before linking islands. A bridge may cross air,
   // never a masked piece of plant or glass. Keep the actual bearing span <= 3 m.
   const candidates=[];
-  for(let i=0;i<n;i++) if(clear[i]) for(const d of [1,w]){
-    if(clear[i+d]) continue;
-    let air=0;
-    for(let k=1;k<=(3+2*EDGE_CLEAR+STEP)/STEP;k++){
-      const j=i+k*d;
-      if(j>=n || solid[j] || (d===1 && j%w<i%w)) break;
-      if(!floor[j]) air++;
-      if(clear[j]){
-        if(air && (air+1)*STEP<=3 && component[i]!==component[j]) candidates.push([i,j,k]);
-        break;
+  for(let i=0;i<n;i++){
+    if (!(i%4096)) yield;
+    if(!clear[i]) continue;
+    for(const d of [1,w]){
+      if(clear[i+d]) continue;
+      let air=0;
+      for(let k=1;k<=(3+2*EDGE_CLEAR+STEP)/STEP;k++){
+        const j=i+k*d;
+        if(j>=n || solid[j] || (d===1 && j%w<i%w)) break;
+        if(!floor[j]) air++;
+        if(clear[j]){
+          if(air && (air+1)*STEP<=3 && component[i]!==component[j]) candidates.push([i,j,k]);
+          break;
+        }
       }
     }
   }
@@ -144,7 +152,7 @@ function raster(site,stations) {
     parent[a]=b;
     for(const [v,u] of [[i,j],[j,i]]){if(!jumps.has(v)) jumps.set(v,[]);jumps.get(v).push(u);}
   }
-  return {w,n,point,index,clear,access,dirs,jumps,region:i=>root(component[i])};
+  return {w,n,point,index,clear,access,dirs,jumps,queue,dist:new Int32Array(n),visited:new Uint16Array(n),searchId:0,region:i=>root(component[i])};
 }
 
 function graph() {return new Map();}
@@ -159,17 +167,19 @@ function length(g,a,b) {
 
 // Reverse breadth-first field from the existing trunk. Minimise new tray;
 // on equivalent paths hold the current heading to avoid gratuitous elbows.
-function attach(g,tree,starts,net) {
+function* attach(g,tree,starts,net) {
   if(starts.some(i=>tree.has(i))) return;
-  const dist=new Int32Array(g.n);dist.fill(-1);
-  const queue=new Int32Array(g.n);
+  const {dist,queue,visited}=g, mark=++g.searchId;
   let tail=0, exit=-1;
   const targets=new Set(starts);
-  for(const i of tree){dist[i]=0;queue[tail++]=i;}
+  for(const i of tree){visited[i]=mark;dist[i]=0;queue[tail++]=i;}
   for(let q=0;q<tail && exit<0;q++){
-    const i=queue[q];
-    for(const j of [...g.dirs.map(d=>i+d),...(g.jumps.get(i)||[])]){
-      if(!g.clear[j]||dist[j]>=0)continue;
+    if (!(q%2048)) yield;
+    const i=queue[q], jumps=g.jumps.get(i);
+    for(let k=0;k<4+(jumps?.length||0);k++){
+      const j=k<4 ? i+g.dirs[k] : jumps[k-4];
+      if(!g.clear[j]||visited[j]===mark)continue;
+      visited[j]=mark;
       dist[j]=dist[i]+1;queue[tail++]=j;
       if(targets.has(j)){exit=j;break;}
     }
@@ -177,28 +187,33 @@ function attach(g,tree,starts,net) {
   if(exit<0)throw Error('Unreachable array or station at '+g.point(starts[0]));
   let i=exit,prev=0;
   while(dist[i]>0){
-    const options=[...g.dirs.map(d=>i+d),...(g.jumps.get(i)||[])].filter(j=>dist[j]===dist[i]-1&&g.clear[j]);
+    const options=[...g.dirs.map(d=>i+d),...(g.jumps.get(i)||[])].filter(j=>visited[j]===mark&&dist[j]===dist[i]-1&&g.clear[j]);
     const j=options.find(j=>j-i===prev)??options[0];
     tree.add(i);link(net,i,j);prev=j-i;i=j;
   }
 }
-function segments(g,net,branches) {
+function* segments(g,net,branches) {
   const runs=[];
-  for(const [i,edges] of net)for(const j of edges){
-    if(j<=i)continue;
-    const d=j-i, bridge=d!==1&&d!==g.w;
-    const branch=branches?.get(i)?.has(j)??false;
-    const same=(a,b)=>net.get(a)?.has(b)&&(branches?.get(a)?.has(b)??false)===branch;
-    if(!bridge && same(i-d,i))continue;
-    let k=j;while(!bridge && same(k,k+d))k+=d;
-    runs.push({a:g.point(i),b:g.point(k),bridge,branch});
+  let visited=0;
+  for(const [i,edges] of net){
+    if (!(visited++%256)) yield;
+    for(const j of edges){
+      if(j<=i)continue;
+      const d=j-i, bridge=d!==1&&d!==g.w;
+      const branch=branches?.get(i)?.has(j)??false;
+      const same=(a,b)=>net.get(a)?.has(b)&&(branches?.get(a)?.has(b)??false)===branch;
+      if(!bridge && same(i-d,i))continue;
+      let k=j;while(!bridge && same(k,k+d))k+=d;
+      runs.push({a:g.point(i),b:g.point(k),bridge,branch});
+    }
   }
   return runs;
 }
-function networkDistances(g,net,start,bridgeRise) {
+function* networkDistances(g,net,start,bridgeRise) {
   // Physical edge weights include the full span of a bridge.
   const dist=new Map([[start,0]]),q=[start];
   for(let k=0;k<q.length;k++){
+    if (!(k%256)) yield;
     const i=q[k];
     for(const j of net.get(i)||[]){
       const span=length(g,i,j);
@@ -237,9 +252,19 @@ export function rackChannel(rack,from,to,ac){
 export function channelLength(points){
   return points.slice(1).reduce((m,p,i)=>m+Math.hypot(...p.map((v,j)=>v-points[i][j])),0);
 }
-export function planRoutes(site,modules=site.computeLayout()) {
+// The checker consumes the same steps synchronously. The renderer schedules
+// them between input events without duplicating the routing algorithm.
+export function planRoutes(site,modules) {
+  return complete(routeSteps(site,modules,true));
+}
+function complete(steps) {
+  let step;
+  do { step=steps.next(); } while (!step.done);
+  return step.value;
+}
+export function* routeSteps(site,modules=site.computeLayout(),includeCells=false) {
   const stations=site.INVERTER_STATIONS.map(s=>({...s,rack:stationRack(site,s)}));
-  const g=raster(site,stations),dc=graph(),ac=graph(),branches=graph();
+  const g=yield* raster(site,stations),dc=graph(),ac=graph(),branches=graph();
   // The graph stops outside the service area. Add each terminal-only spur
   // once all through routes have been traced.
   for(const s of stations){
@@ -269,8 +294,11 @@ export function planRoutes(site,modules=site.computeLayout()) {
   const steps=new Int32Array(g.n).fill(-1),queue=[origin.start];
   steps[origin.start]=0;
   for(let i=0;i<queue.length;i++){
-    const k=queue[i];
-    for(const j of [...g.dirs.map(d=>k+d),...(g.jumps.get(k)||[])])if(g.clear[j]&&steps[j]<0){
+    if (!(i%2048)) yield;
+    const k=queue[i], jumps=g.jumps.get(k);
+    for(let d=0;d<4+(jumps?.length||0);d++){
+      const j=d<4 ? k+g.dirs[d] : jumps[d-4];
+      if (!g.clear[j] || steps[j]>=0) continue;
       steps[j]=steps[k]+1;queue.push(j);
     }
   }
@@ -294,7 +322,7 @@ export function planRoutes(site,modules=site.computeLayout()) {
   }
   if(!face)throw Error('No accessible courtyard coping');
   const landing=g.point(riserDock),acTree=new Set([riserDock]);
-  for(const s of stations)attach(g,acTree,[s.start],ac);
+  for(const s of stations)yield* attach(g,acTree,[s.start],ac);
   const byArray=new Map(),byTable=new Map();
   for(const m of modules){
     if(!byArray.has(m.array))byArray.set(m.array,new Map());
@@ -308,8 +336,9 @@ export function planRoutes(site,modules=site.computeLayout()) {
   for(const a of arrays){
     const s=stations.find(s=>s.id===a.station);
     for(const t of site.TABLES.filter(t=>t.array===a.id)){
+      yield;
       const branch=northBranch(g,t,s.start);
-      attach(g,s.tree,branch,dc);
+      yield* attach(g,s.tree,branch,dc);
       for(let i=0;i<branch.length;i++){
         s.tree.add(branch[i]);if(i){link(dc,branch[i-1],branch[i]);link(branches,branch[i-1],branch[i]);}
       }
@@ -319,12 +348,13 @@ export function planRoutes(site,modules=site.computeLayout()) {
   // An array can contain strings from both stations. Interconnect DC trunks
   // when needed so string home runs reach their actual assigned inverter.
   if(modules.some(m=>stationOf(m.inverter).id!==arrays.find(a=>a.id===m.array).station)){
-    for(const s of stations.slice(1))attach(g,stations[0].tree,[...s.tree],dc);
+    for(const s of stations.slice(1))yield* attach(g,stations[0].tree,[...s.tree],dc);
   }
   for(const {spur} of stations)for(let i=1;i<spur.length;i++){
     link(dc,spur[i-1],spur[i]);link(ac,spur[i-1],spur[i]);
   }
-  const fields=new Map(stations.map(s=>[s.id,networkDistances(g,dc,s.dock,site.BUILDING.parapet.height+.15-.182)]));
+  const fields=new Map();
+  for(const s of stations) fields.set(s.id,yield* networkDistances(g,dc,s.dock,site.BUILDING.parapet.height+.15-.182));
   const routes=site.STRINGS.map(string=>{
     const list=modules.filter(m=>m.string===string.id),s=stationOf(string.inverter);
     // Positive and negative home runs leave opposite ends of the string.
@@ -340,22 +370,22 @@ export function planRoutes(site,modules=site.computeLayout()) {
     if(!Number.isFinite(lengthM))throw Error('Open string home run '+string.id);
     return {string:string.id,inverter:string.inverter,lengthM};
   });
-  const acDistances=networkDistances(g,ac,riserDock,site.BUILDING.parapet.height+.30-.330);
+  const acDistances=yield* networkDistances(g,ac,riserDock,site.BUILDING.parapet.height+.30-.330);
   // Bearings sit on the two masonry banks. The raster landing is farther
   // inland to retain parapet clearance on the ordinary parts of the route.
-  const annotate=run=>{
-    if(!run.bridge)return run;
+  function* annotate(run){
     const a=run.a,b=run.b,l=Math.hypot(b[0]-a[0],b[1]-a[1]),part=Math.ceil(l/.01);
     const point=t=>a.map((v,i)=>v+(b[i]-v)*t);
     let first=part,last=0;
     for(let i=0;i<=part;i++){
+      if (!(i%48)) yield;
       const [x,y]=point(i/part);
       if(!site.ROOF.polygons.some(p=>site.pointInRing(x,y,p.outer)&&!p.holes.some(h=>site.pointInRing(x,y,h)))){
         first=Math.min(first,i);last=i;
       }
     }
     return {...run,bearings:[point((first-1)/part),point((last+1)/part)]};
-  };
+  }
   const tableBonds=site.TABLES.map(t=>{
     const [x,y]=g.point(byTable.get(t.id)[0]);return {a:[x,y],b:[x,t.yNorth],z:t.zHigh,table:t.id,array:t.array};
   });
@@ -369,18 +399,29 @@ export function planRoutes(site,modules=site.computeLayout()) {
     }
     if(wx&&wy)turns.push({point:g.point(i),wx,wy});
   }
-  return {dc:segments(g,dc,branches).map(annotate),ac:segments(g,ac).map(annotate),turns,arrays,routes,tableBonds,landing,face,normal,
+  function* supportedRuns(net,branchNet) {
+    const runs=yield* segments(g,net,branchNet);
+    for(let i=0;i<runs.length;i++) if(runs[i].bridge) runs[i]=yield* annotate(runs[i]);
+    return runs;
+  }
+  yield;
+  const dcRuns=yield* supportedRuns(dc,branches);
+  yield;
+  const acRuns=yield* supportedRuns(ac);
+  return {dc:dcRuns,ac:acRuns,turns,arrays,routes,tableBonds,landing,face,normal,
     stations:stations.map(s=>({id:s.id,entry:s.entry,approach:g.point(s.start),acLength:acDistances.get(s.dock)||0})),
-    dcCells:[...dc.keys()].map(g.point),acCells:[...ac.keys()].map(g.point)};
+    ...(includeCells ? {dcCells:Array.from(dc.keys(),g.point),acCells:Array.from(ac.keys(),g.point)} : {})};
 }
 
 
-export function edgeMasts(site) {
+export function edgeMasts(site) { return complete(mastSteps(site)); }
+export function* mastSteps(site) {
   const free=(x,y)=>!site.OBSTACLES.some(o=>x>o.x0-.5&&x<o.x1+.5&&y>o.y0-.5&&y<o.y1+.5)
     && !site.TABLES.some(t=>Math.hypot(x-Math.max(t.x0,Math.min(t.x1,x)),y-t.ySouth)<2)
     && !site.TABLES.some(t=>x>t.x0-1.2&&x<t.x1+1.2&&y>t.ySouth-10&&y<t.yNorth+.5);
   const candidates=[];
   for(const p of site.ROOF.polygons)for(let i=0;i<p.outer.length;i++){
+    if (!(i%16)) yield;
     const a=p.outer[i],b=p.outer[(i+1)%p.outer.length],l=Math.hypot(b[0]-a[0],b[1]-a[1]);
     if(l<2)continue;
     const n=[-(b[1]-a[1])/l,(b[0]-a[0])/l]; // inward on CCW outer boundary
@@ -393,8 +434,13 @@ export function edgeMasts(site) {
   // Assumed protection zones; snap each to a traced, accessible perimeter edge.
   const selected=[];
   for(const aim of [[-67,11],[-19,31],[35,18],[14,-31],[-16,-94],[-68,-75]]){
-    const picks=candidates.filter(c=>selected.every(m=>Math.hypot(m.foot[0]-c.foot[0],m.foot[1]-c.foot[1])>12));
-    const first=picks.sort((a,b)=>Math.hypot(a.foot[0]-aim[0],a.foot[1]-aim[1])-Math.hypot(b.foot[0]-aim[0],b.foot[1]-aim[1]))[0];
+    yield;
+    let first, nearest=Infinity;
+    for(const c of candidates){
+      const distance=Math.hypot(c.foot[0]-aim[0],c.foot[1]-aim[1]);
+      if(distance>=nearest || selected.some(m=>Math.hypot(m.foot[0]-c.foot[0],m.foot[1]-c.foot[1])<=12)) continue;
+      first=c; nearest=distance;
+    }
     if(first)selected.push(first);
   }
   return selected;

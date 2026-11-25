@@ -305,7 +305,7 @@ body.panel-collapsed #scalebar { right: calc(var(--gap) + 96px); }
 .lbl:hover .lbl-txt { background: rgba(12, 18, 26, 0.92); border-color: rgba(255,185,46,.6); }
 .lbl-sub { display: block; color: #ffd77a; font-size: 11px; font-weight: 550; }
 .lbl.lbl-hidden .lbl-txt { opacity: 0; pointer-events: none; transition: opacity .2s; }
-.lbl.lbl-hidden { pointer-events: none; opacity: 0; }
+.lbl.lbl-hidden { pointer-events: none; opacity: 0; visibility: hidden; }
 .lbl-dot { order: 1; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px rgba(255,185,46,.25); }
 .lbl-minor .lbl-txt { font-size: 11px; padding: 3px 8px; font-weight: 550; }
 .measure-lbl { background: #ffc233; color: #1b1305; padding: 3px 8px; border-radius: 7px; font-size: 12px; white-space: nowrap; text-align: center; box-shadow: 0 3px 10px rgba(0,0,0,.35); line-height: 1.2; }
@@ -342,52 +342,6 @@ body.panel-collapsed #measureHint { transform: translateX(-50%); }
   #brand { max-width: calc(100vw - var(--panel-w) - 120px - 3 * var(--gap)); }
 }
 
-/* ---------------- Phone: bottom sheet ---------------- */
-@media (max-width: 760px) {
-  :root { --gap: 8px; --sheet-h: 56vh; }
-  #brand { top: var(--gap); left: var(--gap); right: 76px; max-width: none; padding: 8px 10px; }
-  .br-title { font-size: 14.5px; }
-  .br-sub { display: none; }
-  .br-eyebrow { font-size: 9.5px; }
-  .br-sun { margin-top: 6px; padding-top: 6px; font-size: 11px; }
-  #compass { top: var(--gap); right: var(--gap); width: 60px; height: 60px; }
-  body.panel-collapsed #compass { right: var(--gap); }
-  #panel {
-    top: auto; left: 0; right: 0; bottom: 0; width: auto; height: var(--sheet-h); border-radius: 18px 18px 0 0; border-bottom: 0;
-    padding-bottom: env(safe-area-inset-bottom);
-  }
-  #panel.collapsed { transform: translateY(calc(var(--sheet-h) - 64px - env(safe-area-inset-bottom))); }
-  .sheet-grip { display: flex; justify-content: center; padding: 6px 0 0; flex: none; cursor: grab; }
-  .sheet-grip i { width: 38px; height: 4px; border-radius: 4px; background: rgba(255,255,255,.28); }
-  .tabs { padding-top: 0; }
-  .tabs button { padding: 6px 2px 7px; font-size: 10.5px; }
-  .tabs button span { font-size: 10px; }
-  .tabs .tab-collapse { display: none; }
-  .panel-foot { display: none; }
-  #panelOpen { display: none !important; }
-  #viewbar { left: var(--gap); right: var(--gap); transform: none !important; max-width: none !important; bottom: calc(var(--sheet-h) + 8px); }
-  body.panel-collapsed #viewbar { bottom: calc(64px + 8px + env(safe-area-inset-bottom)); }
-  #viewbar .vb { padding: 7px 9px; min-height: 40px; min-width: 40px; justify-content: center; font-size: 12px; }
-  #viewbar .elev .vb { min-width: 40px; padding: 7px 8px; }
-  #viewbar .elev-lbl { font-size: 11px; }
-  .tabs button { min-height: 44px; }
-  .tabs button, .tabs button span { font-size: 11px; }
-  .br-eyebrow { font-size: 11px; }
-  .lbl-sub { font-size: 11px !important; }
-  /* phone: stacked above the attribution line, which sits above the view bar */
-  #scalebar, body.panel-collapsed #scalebar { top: auto; left: auto; right: var(--gap); bottom: calc(var(--sheet-h) + 92px); }
-  body.panel-collapsed #scalebar { bottom: calc(64px + 92px + env(safe-area-inset-bottom)); }
-  /* compact heatmap legend docked above the view bar instead of hidden */
-  #legendFloat { left: var(--gap) !important; right: auto !important; top: auto !important; bottom: calc(var(--sheet-h) + 96px) !important; transform: none !important; max-width: 52vw; padding: 6px 9px !important; font-size: 11px; }
-  body.panel-collapsed #legendFloat { bottom: calc(64px + 96px + env(safe-area-inset-bottom)) !important; }
-  #attrib { left: var(--gap); right: var(--gap); bottom: calc(var(--sheet-h) + 64px); font-size: 9px; white-space: normal; text-align: right; }
-  body.panel-collapsed #attrib { bottom: calc(64px + 64px + env(safe-area-inset-bottom)); }
-  #infocard { left: var(--gap); right: var(--gap); width: auto; top: 96px; }
-  #measureHint { top: 96px; transform: translateX(-50%) !important; }
-  #toasts { top: 100px; }
-  .lbl-txt { font-size: 11px; padding: 3px 7px; }
-  .lbl-sub { font-size: 10px; }
-}
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 
 /* clean mode (?clean=1) for presentation captures */
@@ -416,29 +370,6 @@ details.disc summary { cursor: pointer; color: var(--muted); font-weight: 600; }
 details.disc ul { margin: 6px 0 0; padding-left: 17px; line-height: 1.45; }
 .tbl td.muted { color: var(--muted); }
 
-/* ---------------- Phone landscape (e.g. 844×390): slim side drawer, one-line brand, compact chrome ---------------- */
-@media (max-height: 500px) and (orientation: landscape) and (min-width: 761px) {
-  :root { --panel-w: 290px; --gap: 8px; }
-  #brand { padding: 6px 10px; max-width: min(380px, calc(100vw - var(--panel-w) - 150px)); }
-  body.panel-collapsed #brand { max-width: min(420px, calc(100vw - 200px)); }
-  .br-eyebrow, .br-sub, .br-sun { display: none; }
-  .br-title { font-size: 14px; margin: 0; }
-  #compass { width: 54px; height: 54px; }
-  body.panel-collapsed #compass { right: calc(var(--gap) + 92px); }
-  #scalebar { top: calc(var(--gap) + 54px + 6px); }
-  .tabs button { padding: 5px 2px 6px; font-size: 10px; }
-  .tabs .tab-collapse { flex-basis: 26px; }
-  .kpi { padding: 8px 10px; }
-  .kpi .v { font-size: 17px; }
-  .kpi.primary .v { font-size: 22px; }
-  #panel .panel-foot { display: none; }
-  /* view bar: bottom-left overlay, scrolls horizontally instead of clipping */
-  #viewbar { left: var(--gap); bottom: 18px; transform: none; max-width: calc(100vw - var(--panel-w) - 3 * var(--gap)); }
-  body.panel-collapsed #viewbar { transform: none; max-width: calc(100vw - 2 * var(--gap)); }
-  #viewbar .vb { padding: 6px 8px; }
-  #legendFloat { bottom: 66px; }
-  #attrib { bottom: 2px; font-size: 9px; }
-}
 
 #brand { background: rgba(21,28,34,.93); }
 .br-title { white-space: normal; }
@@ -470,12 +401,6 @@ details.disc ul { margin: 6px 0 0; padding-left: 17px; line-height: 1.45; }
 .legend-row > i { width: 62px; height: 8px; display: flex; border-radius: 2px; overflow: hidden; }
 .legend-row > i > i { flex: 1; }
 #groupLegend { margin: 10px 0; }
-@media (max-width:760px) {
-  .br-sub { font-size: 10px; }
-  .plant-switch button { padding: 5px 10px; }
-  #infocard { top: auto; bottom: calc(var(--sheet-h) + 60px); }
-  body.panel-collapsed #infocard { bottom: 128px; }
-}
 
 /* ---------------- Title card and bottom controls can be put away ---------------- */
 #brand {
@@ -506,20 +431,171 @@ body.bottom-hidden #viewbar { translate: 0 calc(100% + 48px); opacity: 0; visibi
 body.panel-collapsed #bottomOpen { right: var(--gap); }
 body.bottom-hidden #bottomOpen { display: flex; }
 
-@media (max-width: 760px) {
-  #brandOpen, body.panel-collapsed #brandOpen { top: calc(var(--gap) + 10px); right: calc(var(--gap) + 60px + 8px); }
-  /* the chevron in the tab row puts the whole bottom sheet away */
-  .tabs .tab-collapse { display: flex; flex: 0 0 44px; }
+
+.phone-system, .summary-site { display: none; }
+#loader.done { display: none; }
+html, body { touch-action: auto; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+input, textarea { user-select: text; -webkit-user-select: text; -webkit-touch-callout: default; }
+#viewport canvas, .lbl { touch-action: none; }
+button, a, select, label.toggle { touch-action: manipulation; }
+.panel-body, #viewbar { overscroll-behavior: contain; }
+#gestureHint {
+  position: fixed; z-index: 8; left: calc((100% - var(--panel-w)) / 2); bottom: 88px;
+  transform: translateX(-50%); padding: 7px 14px; border-radius: 24px; pointer-events: none;
+  background: rgba(15,22,29,.92); color: var(--text); font-size: 14px; white-space: nowrap;
+  transition: opacity .18s ease;
+}
+#gestureHint.fading { opacity: 0; }
+body.panel-collapsed #gestureHint { left: 50%; }
+#contextLost { padding: 22px; width: min(360px, 88vw); color: var(--text); background: #172029;
+  border: 1px solid var(--line-strong); border-radius: var(--radius); text-align: center; }
+#contextLost::backdrop { background: rgba(9,14,20,.96); }
+#contextLost p { margin: 0 0 18px; font-size: 17px; line-height: 1.45; }
+#reload3d { width: 100%; min-height: 48px; font-size: 15px; }
+
+@media (max-width: 760px) and (orientation: portrait), (max-height: 500px) and (orientation: landscape) {
+  :root {
+    --gap: 6px; --left: calc(env(safe-area-inset-left) + var(--gap)); --right: calc(env(safe-area-inset-right) + var(--gap));
+    --top: calc(env(safe-area-inset-top) + var(--gap)); --bottom: env(safe-area-inset-bottom);
+    --screen-h: 100vh; --closed: calc(56px + var(--bottom));
+  }
+  @supports (height: 100dvh) { :root { --screen-h: 100dvh; } }
+  body, #viewport { height: var(--screen-h); font-size: 14px; }
+  #brand, body.panel-collapsed #brand {
+    top: var(--top); left: var(--left); right: var(--right); max-width: none;
+    display: flex; align-items: center; gap: 2px; padding: 0 2px 0 8px; border-radius: 11px;
+  }
+  #brand .br-eyebrow, #brand .br-title, #brand .br-sub, #brand .br-sun { display: none; }
+  .br-text { flex: 1; }
+  .phone-system { display: block; font-size: clamp(12px, 3.55vw, 15px); font-weight: 650; color: var(--accent); white-space: nowrap; letter-spacing: -.025em; }
+  #brandCollapse { position: static; order: 3; width: 44px; height: 44px; flex: none; }
+  .plant-switch { margin: 0; padding: 0; border: 0; }
+  .plant-switch button { min-width: 44px; padding: 0 5px; font-size: 12px; }
+  /* the title card tucks away to the right: its button sits beside the compass, which moves up into the freed row */
+  #brandOpen, body.panel-collapsed #brandOpen { top: var(--top); left: auto; right: calc(var(--right) + 50px); padding: 0; transition: none; }
+  .summary-site { display: grid; gap: 2px; padding-bottom: 12px; margin-bottom: 14px; border-bottom: 1px solid var(--line); color: var(--text-2); }
+  .summary-site strong { color: var(--text); font-size: 16px; }
+  #summarySun { color: var(--accent); }
+  #compass, body.panel-collapsed #compass { top: calc(var(--top) + 50px); right: var(--right); width: 44px; height: 44px; padding: 0; }
+  /* The compass SVG maps 100 drawing units to 42 CSS pixels: only N is lettered at this size. */
+  .cp-lbl { display: none; }
+  .cp-lbl-n { display: block; font-size: 24px; }
+  #scalebar, body.panel-collapsed #scalebar { top: calc(var(--top) + 99px); right: var(--right); bottom: auto; }
+  body.brand-collapsed #compass, body.brand-collapsed.panel-collapsed #compass { top: var(--top); }
+  body.brand-collapsed #scalebar, body.brand-collapsed.panel-collapsed #scalebar { top: calc(var(--top) + 49px); }
+  .glass { backdrop-filter: none; -webkit-backdrop-filter: none; background: rgba(19,26,33,.94); }
+  #panel { background: #141c24; }
+  #viewbar, body.panel-collapsed #viewbar {
+    left: var(--left); right: var(--right); transform: none; max-width: none; gap: 3px;
+    padding: 2px 0 2px 3px; border-radius: 11px; touch-action: pan-x;
+    scroll-snap-type: x proximity; scroll-padding-inline: 4px 48px;
+  }
+  #viewbar .vb, #viewbar .elev .vb { min-width: 44px; min-height: 44px; padding: 0 8px; justify-content: center; font-size: 14px; scroll-snap-align: start; }
+  /* the hide button stays at the right end of the row while the chips scroll under it; its soft edge hints at more chips */
+  #viewbar .vb-hide, #viewbar .vb-hide:hover { position: sticky; right: 0; z-index: 1; flex: none; margin-left: 4px; padding: 0;
+    background: #131a21; border-radius: 0 9px 9px 0; box-shadow: -14px 0 12px -6px #131a21; scroll-snap-align: none; }
+  #brand button, #panel :is(button, select, input:not([type=checkbox]), .toggle, a, summary, .worst li),
+  #panelOpen, .chip-open, #infocard button, #measureHint button { min-width: 44px; min-height: 44px; }
+  .capacity a { display: inline-flex; align-items: center; }
+  .tabs { overflow-x: auto; overscroll-behavior: contain; scrollbar-width: none; }
+  .tabs button { justify-content: center; }
+  .tabs button span { font-size: 12px; }
+  .tabs .tab-collapse { flex: 0 0 44px; }
+  .panel-body { min-height: 0; padding: 12px; }
+  .panel-foot { display: none; }
+  .ld-eyebrow, .br-eyebrow, .tabs button, .panel-foot, h2.sec, .mod-line span, .tbl th,
+  .chart-tip, .ticks, .shade-status, .legend-ticks, .view-btn kbd, .kbd, .kbd-list .kbd,
+  .string-legend, .legend-row, #viewbar .elev-lbl, .sb-txt, #legendFloat,
+  .measure-lbl span, .hprof .hb span { font-size: 12px; }
+  .chart .axis text { font-size: 11px; }
+  .chart .axis .dl { font-size: 12.5px; }
+  #attrib { color: #fff; text-shadow: 0 1px 2px #111a20, 0 0 3px #111a20; }
+  .panel-body :is(.note,.kpi .k,.energy-source,.btn,.chip-btn,.chip-btn small,.readout span,.view-btn,.toggle small,.kbd-list,.seg button,.stats,.callout,details.disc) { font-size: 14px; }
+  .readout b { font-size: 16px; }
+  .stats { overflow-wrap: anywhere; }
+  input[type=range] { margin-inline: 0; }
+  input[type=range]::-webkit-slider-thumb { width: 24px; height: 24px; margin-top: -9px; }
+  input[type=range]::-moz-range-thumb { width: 20px; height: 20px; }
+  .lbl { min-width: 44px; min-height: 44px; justify-content: end; }
+  .lbl-txt, .lbl-minor .lbl-txt, .lbl-sub { font-size: 12px; }
+  .lbl-txt { padding: 3px 6px; backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .lbl-roof .lbl-sub { display: none; }
+  #measureHint, body.panel-collapsed #measureHint { left: var(--left); top: calc(var(--top) + 50px); transform: none; right: calc(var(--right) + 50px); }
+  #toasts { top: calc(var(--top) + 50px); }
+  #infocard { left: var(--left); right: calc(var(--right) + 50px); top: calc(var(--top) + 50px); width: auto; max-height: 52vh; overflow-y: auto; overscroll-behavior: contain; }
+  .ld-card { width: min(320px, calc(100vw - var(--left) - var(--right) - 24px)); }
+  .ld-title { font-size: 22px; line-height: 1.2; }
+  .ld-step, .ld-by { font-size: 14px; }
+  .ld-by { margin-top: 18px; }
+}
+@media (max-width: 760px) and (orientation: portrait) {
+  body { --full: calc(var(--screen-h) - var(--top) - 104px); --rest: var(--closed); --sheet: clamp(var(--closed), var(--sheet-live, var(--rest)), var(--full)); }
+  body[data-sheet=half] { --rest: calc(var(--screen-h) * .50); }
+  body[data-sheet=full] { --rest: var(--full); }
+  #panel, #panel.collapsed { top: auto; left: 0; right: 0; bottom: 0; width: auto; height: var(--sheet); transform: none;
+    padding: 0 env(safe-area-inset-right) var(--bottom) env(safe-area-inset-left); border-radius: 15px 15px 0 0;
+    transition: height .2s ease-out; }
+  #sheetGrip { display: flex; flex: 0 0 55px; align-items: center; justify-content: center; flex-direction: column; gap: 5px;
+    touch-action: none; border: 0; background: none; color: var(--text); cursor: grab; padding: 3px 0 5px; }
+  #sheetGrip i { width: 32px; height: 4px; border-radius: 3px; background: var(--muted); }
+  #sheetHeadline { font-size: clamp(14px,3.95vw,17px); font-weight: 600; font-variant-numeric: tabular-nums; }
+  #panel.collapsed .tabs, #panel.collapsed .panel-body { visibility: hidden; }
+  .sheet-dragging #panel .tabs, .sheet-dragging #panel .panel-body { visibility: visible; }
+  .sheet-dragging #panel, .sheet-dragging #viewbar { transition: none; }
+  #panelOpen { display: none !important; }
+  #viewbar, body.panel-collapsed #viewbar { bottom: calc(var(--sheet) + 3px); transition: bottom .2s ease-out; }
+  body.sheet-dragging #viewbar { transition: none; }
+  #attrib { left: var(--left); right: var(--right); bottom: calc(var(--sheet) + 55px); font-size: 10px; text-align: right; white-space: normal; }
+  #gestureHint, body.panel-collapsed #gestureHint { left: 50%; bottom: calc(var(--sheet) + 80px); }
+  #legendFloat { left: var(--left); bottom: calc(var(--sheet) + 78px); }
+  body[data-sheet=full] :is(#gestureHint,#attrib,#legendFloat) { visibility: hidden; }
+  #bottomOpen, body.panel-collapsed #bottomOpen { right: var(--right); bottom: calc(6px + var(--bottom)); }
+  #panel, #panel.collapsed { transition: height .2s ease-out, transform .3s cubic-bezier(.2, .8, .2, 1), visibility .3s; }
+  body.bottom-hidden #panel, body.bottom-hidden #panel.collapsed { transform: translateY(calc(100% + 12px)); visibility: hidden; }
+  body.bottom-hidden #attrib { right: 110px; bottom: calc(var(--bottom) + 4px); }
   .tabs .tab-collapse .ic { transform: rotate(90deg); }
-  body.bottom-hidden #panel, body.bottom-hidden #panel.collapsed { transform: translateY(calc(100% + 12px)); visibility: hidden; transition: transform .35s cubic-bezier(.2, .8, .2, 1), visibility .35s; }
-  #bottomOpen, body.panel-collapsed #bottomOpen { right: var(--gap); bottom: calc(10px + env(safe-area-inset-bottom)); height: 44px; }
-  body.bottom-hidden #scalebar, body.bottom-hidden.panel-collapsed #scalebar { bottom: calc(64px + env(safe-area-inset-bottom)); }
-  body.bottom-hidden #legendFloat, body.bottom-hidden.panel-collapsed #legendFloat { bottom: calc(64px + env(safe-area-inset-bottom)) !important; }
-  body.bottom-hidden #attrib, body.bottom-hidden.panel-collapsed #attrib { bottom: calc(6px + env(safe-area-inset-bottom)); right: 120px; text-align: left; }
-  body.bottom-hidden #infocard, body.bottom-hidden.panel-collapsed #infocard { bottom: 68px; }
 }
-@media (max-height: 500px) and (orientation: landscape) and (min-width: 761px) {
-  #brandOpen { top: calc(var(--gap) + 7px); right: calc(var(--panel-w) + 2 * var(--gap) + 54px + 8px); }
-  body.panel-collapsed #brandOpen { right: calc(var(--gap) + 92px + 54px + 8px); }
-  #bottomOpen { bottom: 18px; }
+@media (max-height: 500px) and (orientation: landscape) {
+  :root { --panel-w: min(30vw,290px); }
+  #brand, body.panel-collapsed #brand { width: max-content; gap: 6px; }
+  #panel { right: var(--right); top: var(--top); bottom: calc(var(--bottom) + 6px); }
+  #panel.collapsed { visibility: hidden; }
+  #panelOpen { right: var(--right); top: var(--top); }
+  #viewbar { right: calc(var(--right) + var(--panel-w) + 6px); }
+  #viewbar, body.panel-collapsed #viewbar { bottom: calc(var(--bottom) + 16px); }
+  #compass, #scalebar { right: calc(var(--right) + var(--panel-w) + 6px); }
+  #compass, body.panel-collapsed #compass { top: var(--top); }
+  body.panel-collapsed #compass { right: calc(var(--right) + 90px); }
+  #scalebar, body.panel-collapsed #scalebar { top: calc(var(--top) + 46px); }
+  #attrib { left: var(--left); bottom: var(--bottom); font-size: 10px; }
+  #gestureHint { bottom: calc(var(--bottom) + 72px); }
+  #legendFloat { left: var(--left); bottom: calc(var(--bottom) + 70px); }
+  #bottomOpen { bottom: calc(var(--bottom) + 5px); right: calc(var(--right) + var(--panel-w)); }
+  /* title-card button: beside the compass when the drawer is closed, in the card's own place (top right) when it is open */
+  body.panel-collapsed #brandOpen { right: calc(var(--right) + 90px + 50px); }
+  body:not(.panel-collapsed) #brandOpen { right: var(--right); }
+  #panel .tabs { flex-wrap: wrap; justify-content: flex-start; padding: 2px; }
+  #panel .tab-collapse { flex: 1 1 44px; }
+  #panel .view-list, #panel .readout { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  #panel .row, .colour-select { flex-wrap: wrap; }
+  .btn-grid .btn { white-space: normal; }
+  body:not(.panel-collapsed) { --panel-w: min(24vw, 272px); }
+  body:not(.panel-collapsed) #brand { left: auto; right: var(--right); }
+  body:not(.panel-collapsed) #panel { top: calc(var(--top) + 49px); bottom: calc(var(--bottom) + 64px); }
+  body:not(.panel-collapsed) #viewbar { left: auto; right: var(--right); width: var(--panel-w); }
+  body:not(.panel-collapsed) #compass { left: var(--left); right: auto; }
+  body:not(.panel-collapsed) #scalebar { left: var(--left); right: auto; }
+  #panel .tabs button { flex: 1 1 27%; }
+  #panel .btn-grid, #panel .view-list { grid-template-columns: minmax(0,1fr); }
+  #panel .readout, #panel .hero { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  #panel .tbl th, #panel .tbl td { padding-inline: 2px; }
+  #panel .design-data { grid-template-columns: minmax(0,1fr) minmax(0,1fr); }
+  #panel #modeSeg { flex-direction: column; }
+  #panel .seg button { padding-inline: 5px; }
+  #panel .row { gap: 5px; }
+  #panel .time-big { flex-basis: 100%; }
 }
+#brand .br-text { touch-action: none; }
+/* Move only the title and its hit area. Keep the dot on its projected roof point. */
+.lbl { translate: var(--label-shift, 0px) 0; }
+.lbl-dot { translate: calc(0px - var(--label-shift, 0px)) 0; }

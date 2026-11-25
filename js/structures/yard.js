@@ -15,21 +15,26 @@ export function locateYard(site){
   // to include all changes of setback over the full length of the proposed enclosure.
   const ys=site.ROOF.polygons.flatMap(p=>p.outer.map(v=>v[1]));
   const yMin=Math.min(...polygon.map(p=>p[1])), yMax=Math.max(...polygon.map(p=>p[1]));
-  const near=[];
-  for(let d=0;d<yMax-yMin;d+=.5)for(const y of d?[ltPanel.y+d,ltPanel.y-d]:[ltPanel.y]){
+  const cache=new Map();
+  function setback(y){
+    if(!cache.has(y))cache.set(y,westFacade(site,y));
+    return cache.get(y);
+  }
+  let nearest;
+  for(let d=0;d<yMax-yMin && (!nearest || d<=nearest.distance);d+=.5)for(const y of d?[ltPanel.y+d,ltPanel.y-d]:[ltPanel.y]){
     const y0=y-yardD/2-.23,y1=y+yardD/2+.23;
     if(y0<yMin||y1>yMax)continue;
     const levels=[y0,y1,...ys.filter(v=>v>=y0&&v<=y1).flatMap(v=>[v-.001,v+.001])];
-    const east=Math.min(...levels.map(py=>westFacade(site,py)));
+    const east=Math.min(...levels.map(setback));
     if(!Number.isFinite(east))continue;
     const x=Math.min(ltPanel.x,east-yardW/2-.55); // assumed setback from the traced façade
     if(x-yardW/2-.12<t.x1&&x+yardW/2+.12>t.x0&&y1>t.y0&&y0<t.y1)continue;
     if(!rect(x-yardW/2-.2,y0,x+yardW/2+.2,y1).every(p=>site.pointInRing(...p,polygon)))continue;
-    near.push({x,y,distance:Math.hypot(x-ltPanel.x,y-ltPanel.y)});
-    if(!d)return near[0];
+    const distance=Math.hypot(x-ltPanel.x,y-ltPanel.y);
+    if(!nearest || distance<nearest.distance)nearest={x,y,distance};
+    if(!d)return nearest;
   }
-  near.sort((a,b)=>a.distance-b.distance);
-  return near[0]||{x:t.x1+yardW/2+.25,y:t.y1-yardD/2+.80}; // assumed NW fallback
+  return nearest||{x:t.x1+yardW/2+.25,y:t.y1-yardD/2+.80}; // assumed NW fallback
 }
 
 function fence(B,a,b,h,gate=false){
@@ -113,12 +118,14 @@ function equipment(B,x,y){
   }
 }
 
-export function buildYard(ctx,B) {
+export function* buildYard(ctx,B) {
   const {x,y}=locateYard(ctx.site), hx=yardW/2,hy=yardD/2;
   box(B,'paving','#ada899',x,y,.035,yardW+.16,yardD+.18,.11);
   const ring=rect(x-hx,y-hy,x+hx,y+hy);
   for(const [a,b] of edges(ring))fence(B,a,b,1.86,Math.abs(a[1]-b[1])<.01&&a[1]<y);
+  yield;
   transformer(B,x,y+.39,ctx.quality==='low');
+  yield;
   equipment(B,x,y-3.08);
   // assumed 11 kV / 433 V installation. Separate HT cabinet with individual gasketed doors.
   box(B,'paving','#aaa295',x,y+3.80,.14,2.12,1.50,.20);

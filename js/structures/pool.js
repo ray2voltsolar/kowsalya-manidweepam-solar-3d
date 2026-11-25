@@ -3,7 +3,7 @@ import { V, boxAt, tubePath } from './kit.js';
 import { edges, mix, rect, quad, box, pipe, edgeBar, bar } from './geometry.js';
 
 // assumed: raised coping, mosaic-lined basin, entry steps, splash rail, timber shade and club furniture.
-export function buildPool(ctx,B,outline,z,proxy){
+export function* buildPool(ctx,B,outline,z,proxy){
   const {x0,x1,y0,y1}=ctx.site.COMPOUND.pool, ring=rect(x0,y0,x1,y1),mid=(x0+x1)/2;
   const steel='#bbc1bc', timber='#a88760', depth=1.16,low=ctx.quality==='low';
   const floor=quad(ring.map(([x,y])=>[x,y,z-depth-(y1-y)*.042]),[[0,0],[1.75,0],[1.75,1.85],[0,1.85]]);
@@ -30,6 +30,7 @@ export function buildPool(ctx,B,outline,z,proxy){
   }
   for(let k=0;k<3;k++)pipe(B,'metal',steel,[x1-2.04,y0+.32,z-.25-.24*k],[x1-1.48,y0+.32,z-.25-.24*k],.027);
   for(const [a,b] of edges(outline)){
+    yield;
     const n=Math.ceil(Math.hypot(b[0]-a[0],b[1]-a[1])/1.6);
     for(let j=0;j<n;j++){
       const p=mix(a,b,j/n);pipe(B,'metal',steel,[...p,z+.40],[...p,z+1.12],.033);
@@ -66,6 +67,7 @@ export function buildPool(ctx,B,outline,z,proxy){
   }
   // Curved steel runners, sprung seat and reclining canvas backrest.
   for(const [lx,ly] of [[x-1.72,y],[x-.18,y],[x+1.42,y],[mid-2.60,y1+1.54]]){
+    yield;
     const base=z+(lx<mid?.04:.11);
     for(const side of [-.31,.31]){
       const leg=[[lx+side,ly-.80,base+.39],[lx+side,ly-.70,base+.08],[lx+side,ly+.63,base+.08],[lx+side,ly+.76,base+.42]];

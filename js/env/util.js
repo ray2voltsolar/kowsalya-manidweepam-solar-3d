@@ -42,30 +42,11 @@ export function fbm(x, y, oct = 4, seed = 0, period = 0) {
 }
 
 export function makeCanvas(w, h) {
+  if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(w, h);
   const c = document.createElement('canvas');
   c.width = w; c.height = h;
   return c;
 }
-
-/** Height canvas (grey) → tangent-space normal map canvas. */
-export function heightToNormal(src, strength = 2.0) {
-  const w = src.width, h = src.height;
-  const sd = src.getContext('2d').getImageData(0, 0, w, h).data;
-  const out = makeCanvas(w, h); const octx = out.getContext('2d');
-  const od = octx.createImageData(w, h); const d = od.data;
-  const H = (x, y) => sd[(((y + h) % h) * w + ((x + w) % w)) * 4] / 255;
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-    const dx = (H(x + 1, y) - H(x - 1, y)) * strength;
-    const dy = (H(x, y + 1) - H(x, y - 1)) * strength;
-    let nx = -dx, ny = dy, nz = 1; const l = Math.hypot(nx, ny, nz); nx /= l; ny /= l; nz /= l;
-    const i = (y * w + x) * 4;
-    d[i] = (nx * 0.5 + 0.5) * 255; d[i + 1] = (ny * 0.5 + 0.5) * 255; d[i + 2] = (nz * 0.5 + 0.5) * 255; d[i + 3] = 255;
-  }
-  octx.putImageData(od, 0, 0);
-  return out;
-}
-
-
 
 /** Distance from point to polyline [[x,y],...]. */
 export function distToPolyline(x, y, pts) {
@@ -82,11 +63,13 @@ export function distToPolyline(x, y, pts) {
 
 /** Shader snippet: alpha boost with mip level so alpha-tested foliage does not thin out at distance. */
 export const ALPHA_MIP_FIX = /* glsl */`
+  float leafMip = 0.;
   #ifdef USE_MAP
   {
     vec2 _ts = vec2(textureSize(map, 0));
     vec2 _dx = dFdx(vMapUv * _ts), _dy = dFdy(vMapUv * _ts);
     float _mip = max(0.0, 0.5 * log2(max(dot(_dx, _dx), dot(_dy, _dy))));
+    leafMip = _mip;
     diffuseColor.a *= 1.0 + _mip * 0.28;
   }
   #endif
@@ -96,6 +79,18 @@ export const ALPHA_MIP_FIX = /* glsl */`
 export function patchFoliage(mat) {
   mat.onBeforeCompile=sh=>{
     sh.fragmentShader=sh.fragmentShader.replace('#include <map_fragment>','#include <map_fragment>\n'+ALPHA_MIP_FIX)
+      .replace('#include <alphatest_fragment>', `
+        #if defined(USE_ALPHATEST) && defined(ALPHA_TO_COVERAGE)
+          // Centre the coverage ramp on the cutout. Once a whole leaflet is subpixel,
+          // use its filtered silhouette to avoid a bright fringe across the crown.
+          float edge=.5*clamp(fwidth(diffuseColor.a),.01,.30);
+          float soft=smoothstep(alphaTest-edge,alphaTest+edge,diffuseColor.a);
+          diffuseColor.a=mix(soft,step(alphaTest,diffuseColor.a),smoothstep(1.5,3.,leafMip));
+          if(diffuseColor.a<=0.)discard;
+        #else
+          #include <alphatest_fragment>
+        #endif
+      `)
       .replace('#include <normal_fragment_begin>','float faceDirection=1.;vec3 normal=normalize(vNormal);vec3 nonPerturbedNormal=normal;');
   };
   return mat;
@@ -113,17 +108,6 @@ export class GeoBuilder {
   }
   tri(a, b, c) { this.i.push(a, b, c); }
   quad(a, b, c, d) { this.i.push(a, b, c, a, c, d); }
-  /** Append a THREE.BufferGeometry (non-indexed or indexed) with a transform function. */
-  addGeometry(geo, xf, color = [1, 1, 1]) {
-    const pos = geo.attributes.position, nor = geo.attributes.normal, uv = geo.attributes.uv;
-    const base = this.count;
-    for (let k = 0; k < pos.count; k++) {
-      const [p, n] = xf([pos.getX(k), pos.getY(k), pos.getZ(k)], nor ? [nor.getX(k), nor.getY(k), nor.getZ(k)] : [0, 1, 0]);
-      this.vert(p, n, uv ? [uv.getX(k), uv.getY(k)] : [0, 0], typeof color === 'function' ? color(p) : color);
-    }
-    if (geo.index) for (let k = 0; k < geo.index.count; k++) this.i.push(base + geo.index.getX(k));
-    else for (let k = 0; k < pos.count; k++) this.i.push(base + k);
-  }
   build(THREE, { color = false } = {}) {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(this.p, 3));
@@ -171,6 +155,29 @@ export function addTube(gb, pts, radii, radial = 8, vScale = 1, color = [1, 1, 1
   }
 }
 
+// Preserve the straight-alpha colour of fine leaves as the canvas filters each mip.
+export function canvasTexture(THREE, canvas) {
+  const width=canvas.width, height=canvas.height, levels=[];
+  let source=canvas;
+  while(source) {
+    const w=source.width,h=source.height;
+    const pixels=source.getContext('2d').getImageData(0,0,w,h).data;
+    levels.push({width:w,height:h,data:new Uint8Array(pixels.buffer)});
+    let next=null;
+    if(w>1 || h>1) {
+      next=makeCanvas(Math.max(1,w>>1),Math.max(1,h>>1));
+      next.getContext('2d').drawImage(source,0,0,next.width,next.height);
+    }
+    source.width=source.height=1;
+    source=next;
+  }
+  const texture=new THREE.DataTexture(levels[0].data,width,height);
+  texture.mipmaps=levels;texture.flipY=true;
+  texture.minFilter=THREE.LinearMipmapLinearFilter;texture.magFilter=THREE.LinearFilter;
+  texture.needsUpdate=true;
+  return texture;
+}
+
 // Upload all levels explicitly. Some ANGLE backends return empty autogenerated mips
 // for DOM uploads and packed data textures, exposing old imagery or losing fine grain.
 export function completeMips(texture) {
@@ -189,10 +196,43 @@ export function completeMips(texture) {
       level={width,height,data};
     } else {
       const canvas=makeCanvas(width,height);
-      canvas.getContext('2d').drawImage(level,0,0,width,height);level=canvas;
+      canvas.getContext('2d').drawImage(level,0,0,width,height);
+      level=canvas;
     }
     levels.push(level);
   }
   texture.mipmaps=levels;texture.generateMipmaps=false;texture.needsUpdate=true;
+  return texture;
+}
+
+// Explicit levels avoid blank autogenerated mips on some ANGLE backends.
+export async function bitmapLevels(base) {
+  const levels=[base];
+  try {
+    let image=base;
+    while(image.width>1 || image.height>1) {
+      image=await createImageBitmap(image,{
+        resizeWidth:Math.max(1,image.width>>1), resizeHeight:Math.max(1,image.height>>1),
+        resizeQuality:'high'
+      });
+      levels.push(image);
+    }
+    return levels;
+  } catch(error) {
+    for(const level of levels) level.close();
+    throw error;
+  }
+}
+
+// These particular textures can be rebuilt from the local survey and its mask on context restore.
+export function releaseBitmapUpload(texture) {
+  const levels=texture.mipmaps.length ? texture.mipmaps : [texture.image];
+  const release=()=>{
+    for(const level of levels) level.close?.();
+    texture.onUpdate=null;
+    texture.removeEventListener('dispose',release);
+  };
+  texture.onUpdate=release;
+  texture.addEventListener('dispose',release);
   return texture;
 }

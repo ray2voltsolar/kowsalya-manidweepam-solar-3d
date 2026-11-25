@@ -1,6 +1,7 @@
+import {runInSlices} from './schedule.js';
 import * as THREE from 'three';
-import {planRoutes,stationRack,stationLocal,stationPoint,edgeMasts,rackChannel,channelLength} from './bos-route.js';
-import {Batch,material,labelSheet,plate} from './bos-mesh.js';
+import {routeSteps,stationRack,stationLocal,stationPoint,mastSteps,rackChannel,channelLength} from './bos-route.js';
+import {Batch,material,labelSheet,sharePlateMap,plate} from './bos-mesh.js';
 
 const GI=0xa8afaa, STEEL=0x667274, EDGE=0xc5cbc6, PVC=0xc2c7bc, EPDM=0x363c39;
 const DC=.182,AC=.330; // assumed tray centreline heights over screed
@@ -9,8 +10,7 @@ const add=(a,b,k=1)=>a.map((v,i)=>v+b[i]*k);
 const lerp=(a,b,t)=>a.map((v,i)=>v+(b[i]-v)*t);
 
 function trayFinish(ctx) {
-  if(ctx.quality==='low')return material('Folded galvanised steel',.57,.51);
-  const size=ctx.quality==='high'?512:256,cv=document.createElement('canvas');
+  const size=ctx.textureQuality==='high'?512:256,cv=document.createElement('canvas');
   cv.width=size;cv.height=size/4;
   const c=cv.getContext('2d'),pix=c.createImageData(cv.width,cv.height);
   let seed=149;
@@ -28,7 +28,7 @@ function trayFinish(ctx) {
     c.fillStyle='#707878';c.beginPath();c.roundRect(x-size*.020,y-cv.height*.045,size*.040,cv.height*.09,cv.height*.042);c.fill();
   }
   const map=new THREE.CanvasTexture(cv);map.colorSpace=THREE.SRGBColorSpace;map.wrapS=THREE.RepeatWrapping;
-  map.anisotropy=Math.min(ctx.maxAnisotropy||1,8);
+  map.anisotropy=Math.min(ctx.maxAnisotropy||1,16);
   return material('Pressed GI covers and perforated returns',.60,.48,{map});
 }
 
@@ -53,10 +53,10 @@ function covered(b,a,e,low,width,axis,rungs){
     b.face([cross(a,s,h),cross(e,s,h),cross(e,t,k),cross(a,t,k)],side?GI:i===(low?2:4)?0x899596:EDGE,[[0,v],[l/.65,v],[l/.65,w],[0,w]]);
   }
 }
-function rungMaterial(){
+function rungMaterial(aniso){
   const canvas=document.createElement('canvas');canvas.width=4;canvas.height=64;
   const c=canvas.getContext('2d');c.fillStyle='#ffffff';c.fillRect(0,29,4,6);
-  const map=new THREE.CanvasTexture(canvas);map.wrapT=THREE.RepeatWrapping;
+  const map=new THREE.CanvasTexture(canvas);map.anisotropy=aniso;map.wrapT=THREE.RepeatWrapping;
   return material('Ladder crossbars at site scale',.60,.45,{map,alphaTest:.25,side:THREE.DoubleSide});
 }
 function ladder(b,a,e,low,rungs,axis){
@@ -162,7 +162,7 @@ function stairSign(b,site,o,low){
   const {a,e,n,l}=faces.sort((a,b)=>b.score-a.score)[0],wall=lerp(a,e,Math.min(l-.20,l*.48+.81)/l);
   const [x,y]=add(wall,n,.022),h=site.ROOF.z+1.74; // assumed eye-level sign on the latch side
   b.misc.box(x,y,h,n[0] ? .018 : .31,n[0] ? .31 : .018,.12,0xb2a170);
-  if(!low){const [u,v]=add([x,y],n,.011);plate(b.labels,0,u,v,h,.304,.115,n);}
+  const [u,v]=add([x,y],n,.011);plate(b.labels,0,u,v,h,.304,.115,n);
 }
 function panel(b,site,normal,low){
   const p=site.AC_RISER.ltPanel;
@@ -173,13 +173,18 @@ function panel(b,site,normal,low){
   b.misc.box(0,.241,.84,.804,.024,1.278,0xb5bcb4);
   b.misc.box(-.32,.268,.81,.031,.035,.173,EPDM);
   for(let i=0;i<3;i++)b.misc.rod([.12-i*.12,.253,1.15],[.12-i*.12,.270,1.15],.023,[0xb34135,0xd6b557,0x507e92][i],8,.02,true);
-  if(!low){plate(b.labels,5,0,.255,1.32,.46,.14);plate(b.labels,0,.03,.255,.59,.28,.095);}
+  plate(b.labels,5,0,.255,1.32,.46,.14);plate(b.labels,0,.03,.255,.59,.28,.095);
   for(const batch of [b.misc,b.labels])batch.setFrame();
 }
-export function buildBOS(ctx,modules) {
-  const {site}=ctx,z=site.ROOF.z,low=ctx.quality==='low',plan=planRoutes(site,modules);
+export async function buildBOS(ctx,modules) {
+  return runInSlices(ctx, serviceSteps(ctx,modules));
+}
+function* serviceSteps(ctx,modules) {
+  const {site}=ctx,z=site.ROOF.z,low=ctx.quality==='low',plan=yield* routeSteps(site,modules);
   const group=new THREE.Group();group.name='Rooftop electrical and cleaning services';
   const b={tray:new Batch(),steel:new Batch(),rungs:new Batch(),misc:new Batch(),masts:new Batch(),labels:new Batch()};
+  const ancillary=material('Ancillary electrical services',.71,.16,{side:THREE.DoubleSide});
+  if (low) { b.labels=b.misc; sharePlateMap(ctx,b.misc,ancillary); }
   const report={dcTrayM:0,acTrayM:0,dcCableM:0,acCableM:0,earthStripM:0,laCount:0,bridgeCount:0,bridgeSpansM:[],routes:plan.routes};
   const bridges=new Set();
   const route=(points,ac,width=.15,axis=[0,1])=>{
@@ -193,6 +198,7 @@ export function buildBOS(ctx,modules) {
     return sum;
   };
   for(const [segments,ac] of [[plan.dc,false],[plan.ac,true]])for(const s of segments){
+    yield;
     const level=z+(ac?AC:DC),a=[...s.a,level],e=[...s.b,level];
     const deck=s.bridge?z+site.BUILDING.parapet.height+(ac ? .30 : .15):level;
     const width=(ac||s.branch) ? .15 : .30; // assumed covered trunk and table branch sizes
@@ -222,6 +228,7 @@ export function buildBOS(ctx,modules) {
     }
   }
   if(!low)for(const {point:[x,y],wx,wy} of plan.turns){
+    yield;
     const a=wy/2,e=wx/2,r=.024,h=z+DC+.039;
     const outline=[[-a+r,-e],[a-r,-e],[a,-e+r],[a,e-r],[a-r,e],[-a+r,e],[-a,e-r],[-a,-e+r]];
     b.tray.face(outline.map(([u,v])=>[x+u,y+v,h]),0x879294);
@@ -234,6 +241,7 @@ export function buildBOS(ctx,modules) {
   report.bridgeCount=bridges.size;
   const taps=new Set();
   for(const bond of plan.tableBonds){
+    yield;
     const [x,y]=add(bond.a,[.177,.177]),end=[bond.b[0],bond.b[1],bond.z-.042];
     const corner=[end[0],end[1],z+DC-.026];
     report.earthStripM+=ribbon(b.misc,[x,y,corner[2]],corner,.025,STEEL)+ribbon(b.misc,corner,end,.025,STEEL);
@@ -269,18 +277,22 @@ export function buildBOS(ctx,modules) {
         report.acCableM+=st.acLength+tail+drop+channelLength(rackChannel(rack,u,rack.cabinet,true))+channelLength(rackChannel(rack,ix-.302,rack.cabinet,true))+1.72; // assumed gland tails
     }
   }
-  const masts=edgeMasts(site);
+  yield;
+  const masts=yield* mastSteps(site);
   for(const m of masts)protect(b,site,m,report,low);
   report.laCount=masts.length;
   for(const o of site.OBSTACLES.filter(o=>o.type==='headroom'))stairSign(b,site,o,low);
   report.dcCableM=report.routes.reduce((sum,r)=>sum+r.lengthM,0);
   const steel=material('Cable ladder and fastenings',.58,.51,{side:THREE.DoubleSide});
+  yield;
   b.tray.mesh(group,'Covered DC cable trays',trayFinish(ctx));
+  yield;
   b.steel.mesh(group,'AC ladder, cable runs and riser brackets',steel);
-  b.rungs.mesh(group,'Ladder crossbars',rungMaterial());
-  b.misc.mesh(group,'Earthing, saddle blocks, cleaning pipe and LT panel',material('Ancillary electrical services',.71,.16,{side:THREE.DoubleSide}));
+  b.rungs.mesh(group,'Ladder crossbars',rungMaterial(Math.min(ctx.maxAnisotropy||1,16)));
+  yield;
+  b.misc.mesh(group,'Earthing, saddle blocks, cleaning pipe and LT panel',ancillary);
   b.masts.mesh(group,'Lightning air terminals and stays',steel,true,ctx);
-  if(!low)b.labels.mesh(group,'Electrical warning plates',labelSheet(ctx.quality,ctx.maxAnisotropy,site.INVERTERS));
+  if(!low)b.labels.mesh(group,'Electrical warning plates',labelSheet(ctx));
   group.userData.arrays=plan.arrays.map(({id,station})=>({id,station}));
   return {group,report};
 }

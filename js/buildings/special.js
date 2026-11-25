@@ -78,15 +78,15 @@ function accessRoom(K,md,o,idx) {
   if(!o.tank)return;
   // Choose an accessible landing first. In the west wing only one side has a walkable terrace.
   const findLanding=(frac,half)=>{
-    const choices=[];
+
     for(const s of [doorSide,...other]) for(const t of [frac,1-frac,.35,.65,.5]) {
       const along=Math.max(half,Math.min(s.len-half,s.len*t));
       if(s===doorSide && along+half>left-.10 && along-half<right+.10)continue;
       const points=[along-half,along,along+half].flatMap(u=>[.17,.52,.85].map(v=>pt(s.f,u,z,v)));
       if(!points.every(([x,y])=>inside(K.site,x,y)&&clearTables(K.site,x-.07,y-.07,x+.07,y+.07)))continue;
-      choices.push({s,along});
+      return {s,along};
     }
-    return choices[0];
+
   };
   const climb=findLanding(.21,.31);
   if(climb)ladder(md,climb.s.f,climb.along,z,h);

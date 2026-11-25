@@ -41,6 +41,7 @@ export function createUI({ site, summary, views, handlers }) {
   $('#brLocation').textContent = `Prepared by ${P.preparedBy}`;
   $('#brLocation').title = P.address;
   $('#brSystem').textContent = P.systemLabel;
+  $('#phoneSystem').textContent = `${summary.kwp.toFixed(2)} kWp Rooftop Solar`;
   $('#siteAddress').textContent = P.address;
   $('.ld-title').textContent = P.customer;
   $('.ld-sub').textContent = P.systemLabel;
@@ -57,6 +58,38 @@ export function createUI({ site, summary, views, handlers }) {
     if (text) $('#ldStep').textContent = text;
   };
   ui.hideLoader = () => { $('#loader').classList.add('done'); };
+  let hintShown = false;
+  ui.showGestureHint = () => {
+    if (hintShown) return;
+    hintShown = true;
+    try {
+      if (sessionStorage.getItem('r2v.gestureHint')) return;
+      sessionStorage.setItem('r2v.gestureHint', '1');
+    } catch { /* Storage may be unavailable in an in-app browser. */ }
+    const hint = $('#gestureHint');
+    hint.textContent = matchMedia('(pointer: coarse)').matches
+      ? 'Drag to rotate · pinch to zoom' : 'Drag to rotate · scroll to zoom';
+    hint.hidden = false;
+    const view = $('#viewport');
+    const dismiss = () => {
+      clearTimeout(timer);
+      hint.classList.add('fading');
+      setTimeout(() => { hint.hidden = true; }, 200);
+      view.removeEventListener('pointerdown', dismiss, true);
+      view.removeEventListener('wheel', dismiss, true);
+    };
+    const timer = setTimeout(dismiss, 6000);
+    view.addEventListener('pointerdown', dismiss, true);
+    view.addEventListener('wheel', dismiss, {capture:true, passive:true});
+  };
+  const paused = $('#contextLost');
+  paused.addEventListener('cancel', e => e.preventDefault());
+  paused.addEventListener('keydown', e => e.stopPropagation());
+  ui.showContextLost = onReload => {
+    $('#reload3d').onclick = () => onReload();
+    if (!paused.open) paused.showModal();
+  };
+  ui.hideContextLost = () => { if (paused.open) paused.close(); };
 
   // ---------------- Toasts
   ui.toast = (msg, type = 'info', ms = 4200) => {
@@ -69,25 +102,37 @@ export function createUI({ site, summary, views, handlers }) {
 
   // ---------------- Tabs / panel
   const panel = $('#panel');
-  const isPhone = () => matchMedia('(max-width: 760px)').matches;
+  const phone = matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 600;
+  const sheetLayout = matchMedia('(max-width: 760px) and (orientation: portrait)');
+  const grip = $('#sheetGrip');
+  $('#sheetHeadline').textContent = `${summary.kwp.toFixed(2)} kWp · ${summary.modules} modules · ${formatIN(Math.round(summary.annualKwh))} kWh`;
   function setTab(name) {
-    $$('.tabs [data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
+    $$('.tabs [data-tab]').forEach(b => {
+      const active = b.dataset.tab === name;
+      b.classList.toggle('active', active);
+      b.setAttribute('aria-selected', String(active));
+    });
     $$('.tab-pane').forEach((p) => p.classList.toggle('active', p.dataset.pane === name));
     ui.activeTab = name;
     $('#panelBody').scrollTop = 0;
   }
-  function setCollapsed(c) {
+  let level = 0;
+  function setLevel(next) {
+    level = next;
+    const c = level === 0;
+    document.body.dataset.sheet = ['closed', 'half', 'full'][level];
+    document.body.style.removeProperty('--sheet-live');
     panel.classList.toggle('collapsed', c);
     document.body.classList.toggle('panel-collapsed', c);
+    grip.setAttribute('aria-expanded', String(!c));
+    $('#panelBody').inert = c;
+    $('.tabs').inert = c;
     H.onPanelChange && H.onPanelChange();
   }
+  const setCollapsed = c => setLevel(c ? 0 : level || 1);
   ui.setCollapsed = setCollapsed;
   ui.isCollapsed = () => panel.classList.contains('collapsed');
   $$('.tabs [data-tab]').forEach((b) => b.addEventListener('click', () => {
-    if (isPhone()) {
-      if (ui.activeTab === b.dataset.tab && !ui.isCollapsed()) { setCollapsed(true); return; }
-      if (ui.isCollapsed()) setCollapsed(false);
-    }
     setTab(b.dataset.tab);
   }));
   ui.activeTab = 'summary';
@@ -105,7 +150,7 @@ export function createUI({ site, summary, views, handlers }) {
   function setBottomHidden(h, persist = true) {
     document.body.classList.toggle('bottom-hidden', h);
     $('#viewbar').inert = h;
-    panel.inert = h && isPhone();
+    panel.inert = h && sheetLayout.matches;
     if (persist) pref.set('r2v.bottom', h ? 'hidden' : 'shown');
     H.onPanelChange && H.onPanelChange();
   }
@@ -115,33 +160,63 @@ export function createUI({ site, summary, views, handlers }) {
   $('#brandCollapse').addEventListener('click', () => setBrandCollapsed(true));
   $('#brandOpen').addEventListener('click', () => setBrandCollapsed(false));
   $('#bottomOpen').addEventListener('click', () => setBottomHidden(false));
-  // phones start with the title card put away so the model has the screen
-  { const saved = pref.get('r2v.card'); setBrandCollapsed(saved ? saved === 'hidden' : isPhone(), false); }
+  // phones (and any phone-sized layout) start with the title card put away so the model has the screen
+  const compactLayout = matchMedia('(max-width: 760px) and (orientation: portrait), (max-height: 500px) and (orientation: landscape)');
+  { const saved = pref.get('r2v.card'); setBrandCollapsed(saved ? saved === 'hidden' : phone || compactLayout.matches, false); }
   if (pref.get('r2v.bottom') === 'hidden') setBottomHidden(true, false);
   // desktop: the chevron slides the side panel away to the right; phone: it puts the whole bottom sheet away
-  $('#panelCollapse').addEventListener('click', () => (isPhone() ? setBottomHidden(true) : setCollapsed(true)));
+  $('#panelCollapse').addEventListener('click', () => (sheetLayout.matches ? setBottomHidden(true) : setCollapsed(true)));
   $('#panelOpen').addEventListener('click', () => setCollapsed(false));
-  $('#sheetGrip').addEventListener('click', () => setCollapsed(!ui.isCollapsed()));
+  let drag = null, suppressClick = false;
+  grip.addEventListener('pointerdown', e => {
+    if (drag || e.button !== 0) return;
+    suppressClick = false;
+    drag = {id:e.pointerId, y:e.clientY, height:panel.offsetHeight, moved:false};
+    if (e.isTrusted) grip.setPointerCapture(e.pointerId);
+  });
+  grip.addEventListener('pointermove', e => {
+    if (!drag || drag.id !== e.pointerId) return;
+    const delta = drag.y - e.clientY;
+    if (!drag.moved && Math.abs(delta) < 5) return;
+    drag.moved = true;
+    document.body.classList.add('sheet-dragging');
+    document.body.style.setProperty('--sheet-live', `${drag.height + delta}px`);
+  });
+  function release(e) {
+    if (!drag || drag.id !== e.pointerId) return;
+    const delta = drag.y - e.clientY;
+    suppressClick = drag.moved;
+    drag = null;
+    document.body.classList.remove('sheet-dragging');
+    const step = e.type === 'pointerup' && Math.abs(delta) > 20 ? Math.sign(delta) : 0;
+    setLevel(Math.max(0, Math.min(2, level + step)));
+  }
+  grip.addEventListener('pointerup', release);
+  grip.addEventListener('pointercancel', release);
+  grip.addEventListener('lostpointercapture', release);
+  grip.addEventListener('click', e => {
+    if (!suppressClick || e.detail === 0) setCollapsed(!ui.isCollapsed());
+    suppressClick = false;
+  });
   ui.togglePanel = () => setCollapsed(!ui.isCollapsed());
   ui.setTab = setTab;
   // Panel offset for the 3D view (desktop: shift the scene centre left of the panel)
   ui.panelOffsetPx = () => {
-    if (isPhone() || ui.isCollapsed()) return 0;
-    const r = panel.getBoundingClientRect();
-    if (!r.width || document.body.classList.contains('clean')) return 0;
-    return Math.max(0, innerWidth - r.left);
+    if (sheetLayout.matches || ui.isCollapsed()) return 0;
+    if (document.body.classList.contains('clean')) return 0;
+    // The panel may still be translated offscreen at the start of its opening animation.
+    return panel.offsetWidth + (parseFloat(getComputedStyle(panel).right) || 0);
   };
-  // Phone: the bottom sheet (+ the view bar above it) hides the lower part of the 3D view → the
-  // camera recentres the model in the visible area above it (computed from the CSS, not the
-  // animating rect, so it is correct immediately after a toggle).
+  // Read the actual strip so safe areas, rotation and an in-progress drag follow CSS.
   ui.panelOffsetY = () => {
-    if (!isPhone() || document.body.classList.contains('clean') || document.body.classList.contains('bottom-hidden')) return 0;
-    const sheet = ui.isCollapsed() ? 64 : 0.56 * innerHeight;
-    const vb = $('#viewbar'); const vbh = vb ? (vb.getBoundingClientRect().height || 44) : 44;
-    return Math.max(0, Math.min(innerHeight * 0.7, sheet + vbh + 12));
+    if ((!phone && !sheetLayout.matches) || document.body.classList.contains('clean') || ui.isBottomHidden()) return 0;
+    if (!sheetLayout.matches && !ui.isCollapsed()) return 0; // chips are docked under the side panel
+    return Math.max(0, innerHeight - $('#viewbar').getBoundingClientRect().top);
   };
   // phones (portrait sheet) and short landscape screens (phone rotated, ≤ 500 px high) start with the panel collapsed
-  if (isPhone() || matchMedia('(max-height: 500px) and (orientation: landscape)').matches) setCollapsed(true);
+  setCollapsed(phone || sheetLayout.matches || matchMedia('(max-height: 500px) and (orientation: landscape)').matches);
+  new ResizeObserver(() => H.onPanelChange?.()).observe(panel);
+  sheetLayout.addEventListener('change', () => { panel.inert = ui.isBottomHidden() && sheetLayout.matches; });
   // keep pointer/wheel events inside the panel from reaching the canvas
   for (const el of [panel, $('#viewbar'), $('#brand'), $('#infocard'), $('#legendFloat')]) {
     el.addEventListener('wheel', (e) => e.stopPropagation(), { passive: true });
@@ -164,6 +239,7 @@ export function createUI({ site, summary, views, handlers }) {
       return `<tr class="${active ? 'selected-variant' : ''}"><td><a href="${escapeHtml(url.search)}" ${active ? 'aria-current="true"' : ''}>${v.wp} W · ${v.mounting}</a></td><td class="num">${v.goodPractice.modules}</td><td class="num">${v.goodPractice.kwp.toFixed(1)}</td><td class="num">${v.meetsTarget ? 'Yes' : 'No'}</td></tr>`;
     }).join('');
     $('#paneSummary').innerHTML = `
+      <div class="summary-site"><strong>${escapeHtml(P.customer)}</strong><span>Prepared by ${escapeHtml(P.preparedBy)}</span><span>${escapeHtml(P.systemLabel)}</span><span id="summarySun"></span><span>${escapeHtml(P.address)}</span></div>
       <div class="hero">
         <div class="kpi primary"><div class="k">Proposed DC capacity</div><div class="v">${s.kwp.toFixed(2)}<small>kWp</small></div><div class="k">${s.modules} modules × ${site.MODULE.wp} Wp</div></div>
         <div class="kpi energy-kpi"><div class="k">Year-1 generation</div><div class="v">${formatIN(Math.round(s.annualKwh))}<small>kWh</small></div><div class="k">${(s.annualKwh / 100000).toFixed(2)} lakh units · after ${s.firstYearDegradationPct} % first-year degradation</div>
@@ -271,6 +347,7 @@ export function createUI({ site, summary, views, handlers }) {
     chip.classList.toggle('night', r.elevation < 0);
     $('#sunChipText').textContent = `${r.dateLabel} · ${r.timeLabel} IST · ` +
       (r.elevation < -0.8 ? 'Sun below horizon' : `Sun ${r.azimuth.toFixed(0)}° az, ${r.elevation.toFixed(0)}° el`);
+    $('#summarySun').textContent = $('#sunChipText').textContent;
   };
   ui.setPlaying = (p) => {
     const b = $('#playBtn');

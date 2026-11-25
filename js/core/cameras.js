@@ -31,6 +31,28 @@ const overview = {
   target: [x - width * .07, y - depth * .06, z * .40], fov: 40,
 };
 
+// A phone can change its available frame while the preset stays selected.
+// Fit the silhouette in camera space once, then adjust only the lens as the sheet moves.
+function fitSilhouette(target, dir, dist, footprint, base) {
+  const right = new THREE.Vector3(dir.z, 0, -dir.x).normalize();
+  const up = new THREE.Vector3().crossVectors(dir, right);
+  const delta = new THREE.Vector3();
+  let sx, sy;
+  for (let pass = 0; pass < 3; pass++) {
+    let left = Infinity, rightmost = -Infinity, bottom = Infinity, top = -Infinity;
+    for (const [east,north] of footprint) for (const height of [base, z + BUILDING.parapet.height]) {
+      delta.set(east,height,-north).sub(target);
+      const depth = dist - delta.dot(dir);
+      const u = delta.dot(right)/depth, v = delta.dot(up)/depth;
+      left = Math.min(left,u); rightmost = Math.max(rightmost,u);
+      bottom = Math.min(bottom,v); top = Math.max(top,v);
+    }
+    sx = rightmost-left; sy = top-bottom;
+    if (pass < 2) target.addScaledVector(right,dist*(left+rightmost)/2).addScaledVector(up,dist*(bottom+top)/2);
+  }
+  return { target, sx, sy };
+}
+
 const plan = {ortho: true, plan: true, target: [x, y, z], halfH: depth / (2 * .85)};
 const clearTerrace = (east, north, margin = .12) =>
   ROOF.polygons.some(p => pointInRing(east, north, p.outer) && !p.holes.some(h => pointInRing(east, north, h))) &&
@@ -109,6 +131,15 @@ export function inverterView(st) {
   return {cam: eye(dist), target: [st.x,st.y,st.z+1.45], fov: 49};
 }
 
+// These four camera placements search the roof tables. Only do that work when
+// somebody visits the preset; the view menu only needs the label and group.
+function detailPreset(label, group, solve, key) {
+  let pose;
+  const get = () => (pose ??= solve());
+  return {label, group, key, get cam() { return get().cam; },
+    get target() { return get().target; }, get fov() { return get().fov; }};
+}
+
 export const VIEWS = {
   overview: { ...overview, label: 'Overview', key: '1', group: 'main' },
   hero: {label:'South-west aerial', group:'main', cam:[x-107,y-117,z+64], target:[x-8,y-15,z*.30], fov:40},
@@ -123,10 +154,10 @@ export const VIEWS = {
   })),
   road: {label: 'Main road', key: '6', group: 'street', cam: [-92,-78,1.7], target: [-60,-40,11], fov: 60},
   gate: {label: 'Entrance', key: '7', group: 'street', cam: [gate.x - 9,gate.y - 2,1.7], target: [gate.x + 9,gate.y + 3,3.5], fov: 58},
-  terrace: {label: 'Terrace', key: '8', group: 'detail', ...terraceView()},
-  detailArray: {label:'East wing arrays', group:'roof', ...arrayView()},
-  detailStructure: {label:'Mounting detail', group:'detail', ...structureView()},
-  walkway: {label:'Row walkway', group:'detail', ...terraceView(true)},
+  terrace: detailPreset('Terrace', 'detail', terraceView, '8'),
+  detailArray: detailPreset('East wing arrays', 'roof', arrayView),
+  detailStructure: detailPreset('Mounting detail', 'detail', structureView),
+  walkway: detailPreset('Row walkway', 'detail', () => terraceView(true)),
   inverter: {label: 'Inverters', key: '9', group: 'detail', ...inverterView(station)},
   drone: {...overview, label: 'Drone orbit', key: '0', group: 'main', drone: true},
   ...Object.fromEntries([['N','North',0,1],['S','South',0,-1],['E','East',1,0],['W','West',-1,0]].map(([k, name, dx, dy]) =>
@@ -144,6 +175,20 @@ export class CameraRig {
     this.fov = 40; // fov used for ortho-equivalent distance
     this.w = 1; this.h = 1; this.offsetPx = 0;
     this.listeners = new Set();
+    this.phone = matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 600;
+    if (this.phone) {
+      // Opening the title card moves the compass down without resizing the canvas.
+      let tucked = document.body.classList.contains('brand-collapsed');
+      new MutationObserver(() => {
+        const next = document.body.classList.contains('brand-collapsed');
+        if (next !== tucked && this.h > this.w) this.setSize(this.w, this.h);
+        tucked = next;
+      }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+      this.viewbar = document.querySelector('#viewbar');
+      this.viewbar.addEventListener('transitionend', e => {
+        if (e.target === this.viewbar && e.propertyName === 'bottom' && this.h > this.w) this.setSize(this.w, this.h);
+      });
+    }
 
     const c = new OrbitControls(this.persp, domElement);
     c.enableDamping = true; c.dampingFactor = 0.085;
@@ -159,11 +204,58 @@ export class CameraRig {
     this.controls = c;
     this.anim = null;
     this.currentView = null;
+    this.installGestures(domElement);
+    let interacting = false;
     c.addEventListener('start', () => {
+      interacting = true;
       this.cancelAnim();
       if (c.autoRotate) { c.autoRotate = false; this._emit('drone', false); }
       if (this.ortho.near !== 1 || this.ortho.far !== ORTHO_FAR) { this.ortho.near = 1; this.ortho.far = ORTHO_FAR; this.ortho.updateProjectionMatrix(); }
-      this.currentView = null; this._emit('view', null);
+    });
+    c.addEventListener('change', () => {
+      if (interacting && this.currentView) {
+        this.currentView = null;
+        this._emit('view', null);
+      }
+    });
+    c.addEventListener('end', () => { interacting = false; });
+  }
+
+  installGestures(canvas) {
+    const c = this.controls;
+    const fingers = new Set();
+    let tap = null, last = null, lastTouch = -Infinity;
+    canvas.addEventListener('pointerdown', e => {
+      // The vendored r170 controls expose no public damping reset. Clear only
+      // the outstanding rotation and pan, preserving the current camera pose.
+      c._sphericalDelta.set(0, 0, 0);
+      c._panOffset.set(0, 0, 0);
+      this.cancelAnim();
+      if (e.pointerType !== 'touch') return;
+      fingers.add(e.pointerId);
+      tap = fingers.size === 1 ? {id:e.pointerId, x:e.clientX, y:e.clientY, t:e.timeStamp} : null;
+      if (!tap) last = null;
+    }, true);
+    canvas.addEventListener('pointermove', e => {
+      if (tap?.id === e.pointerId && Math.hypot(e.clientX-tap.x, e.clientY-tap.y) > 5) tap = last = null;
+    });
+    const release = e => {
+      if (!fingers.delete(e.pointerId)) return;
+      lastTouch = e.timeStamp;
+      if (e.type === 'pointerup' && tap?.id === e.pointerId && e.timeStamp-tap.t <= 300 &&
+          Math.hypot(e.clientX-tap.x,e.clientY-tap.y) <= 5) {
+        if (last && e.timeStamp-last.t <= 300 && Math.hypot(e.clientX-last.x,e.clientY-last.y) <= 24) {
+          last = null;
+          this.onDoubleTap?.(e.clientX, e.clientY);
+        } else last = {x:e.clientX, y:e.clientY, t:e.timeStamp};
+      } else last = null;
+      tap = null;
+    };
+    canvas.addEventListener('pointerup', release);
+    canvas.addEventListener('pointercancel', release);
+    canvas.addEventListener('lostpointercapture', release);
+    canvas.addEventListener('dblclick', e => {
+      if (e.button === 0 && e.timeStamp-lastTouch > 500) this.onDoubleTap?.(e.clientX, e.clientY);
     });
   }
 
@@ -172,8 +264,40 @@ export class CameraRig {
 
   /** offsetPx: width covered by the side panel (right); offsetY: height covered by the phone sheet (bottom). */
   setSize(w, h, offsetPx = this.offsetPx, offsetY = this.offsetY || 0) {
+    const resized = w !== this.w || h !== this.h;
+    // Rotation can report the old landscape offset while the view bar is still
+    // sliding into its portrait position. Use its painted edge for the closed sheet.
+    if (this.phone && h > w && document.body.matches('.panel-collapsed:not(.bottom-hidden):not(.clean)')) {
+      offsetY = Math.max(0, h - this.viewbar.getBoundingClientRect().top);
+    }
     this.w = w; this.h = h; this.offsetPx = offsetPx; this.offsetY = offsetY;
+    if (this.phone) {
+      this.controls.dampingFactor = .18;
+      this.controls.rotateSpeed = .5 * h / w;
+      this.topInset = document.body.classList.contains('clean') ? 0 :
+        Math.ceil(document.querySelector(document.body.classList.contains('brand-collapsed') ? '#brandOpen' : '#brand')?.getBoundingClientRect().bottom || 0);
+      this.bottomInset = offsetY;
+      if (h > w && !document.body.classList.contains('clean')) {
+        this.topInset = Math.max(this.topInset, document.querySelector('#compass').getBoundingClientRect().bottom);
+        const restore = getComputedStyle(document.querySelector('#bottomOpen'));
+        const restoreHeight = Math.max(parseFloat(restore.height), parseFloat(restore.minHeight));
+        this.bottomInset = Math.max(offsetY, restoreHeight + parseFloat(restore.bottom));
+      }
+    }
     this.updateProjection();
+    // Resize events can arrive ahead of the panel-offset easing in main.
+    // Refit until the new orientation has settled, unless the user takes over.
+    if (this.phone && resized) this.refitUntil = performance.now() + 1500;
+    const portraitOverview = this.currentView === 'overview' && h > w &&
+      (document.body.classList.contains('panel-collapsed') || document.body.classList.contains('bottom-hidden'));
+    if (this.phone && this.currentView && !this.controls.autoRotate && (portraitOverview || performance.now() < this.refitUntil)) {
+      if (!this.anim) this.applyState(this.viewState(this.currentView));
+      else if (this.currentView === 'overview') {
+        this.anim.to = this.viewState('overview');
+        const delta = this.anim.to.theta - this.anim.from.theta;
+        this.anim.dTheta = Math.atan2(Math.sin(delta), Math.cos(delta));
+      }
+    }
   }
 
   /** Virtual full frame: the visible area (w-off)×(h-offY) is centred in a (w+off)×(h+offY) frustum. */
@@ -183,11 +307,12 @@ export class CameraRig {
     const aspect = fullW / fullH;
     const p = this.persp;
     p.aspect = aspect;
-    if (off > 0 || offY > 0) p.setViewOffset(fullW, fullH, off, offY, w, h); else p.clearViewOffset();
+    const originY = (offY + Math.round(this.bottomInset ?? offY) - (this.topInset || 0)) / 2;
+    if (off || originY) p.setViewOffset(fullW, fullH, off, originY, w, h); else p.clearViewOffset();
     p.updateProjectionMatrix();
     const o = this.ortho;
     o.left = -ORTHO_H0 * aspect; o.right = ORTHO_H0 * aspect; o.top = ORTHO_H0; o.bottom = -ORTHO_H0;
-    if (off > 0 || offY > 0) o.setViewOffset(fullW, fullH, off, offY, w, h); else o.clearViewOffset();
+    if (off || originY) o.setViewOffset(fullW, fullH, off, originY, w, h); else o.clearViewOffset();
     o.updateProjectionMatrix();
   }
 
@@ -275,12 +400,25 @@ export class CameraRig {
       } else {
         dist = v.halfH / Math.tan(fov * DEG / 2);
         // the halfH is for a 16:10 screen; narrower visible areas (portrait, panel open) widen
-        dist *= Math.max(1, (this.h + this.offsetY) / (this.h - this.offsetY), (width / depth) * (this.h + this.offsetY) / (this.w - this.offsetPx));
+        dist *= Math.max(1, (this.h + this.offsetY) / Math.max(1, this.h - this.offsetY - (this.topInset || 0)), (width / depth) * (this.h + this.offsetY) / (this.w - this.offsetPx));
       }
     } else {
       const off = P(v.cam).sub(target);
       dist = off.length(); dir = off.normalize();
-      if (v.group !== 'street' && (v.group !== 'detail' || name === 'inverter')) {
+      if (this.phone && (name === 'overview' || name.startsWith('block'))) {
+        const portrait = name === 'overview' && this.h > this.w;
+        // Look along the long axis from the south-west, keeping the west and south façades visible.
+        if (portrait) dir.setFromSphericalCoords(1, (90 - 52) * DEG, -18 * DEG);
+        const b = BLOCKS[name.slice(5)]?.bounds;
+        const footprint = b ? [[b.x0,b.y0],[b.x0,b.y1],[b.x1,b.y0],[b.x1,b.y1]] : outline;
+        const fit = portrait
+          ? (this.portraitFit ??= fitSilhouette(target.clone(), dir, dist, outline, 0))
+          : fitSilhouette(target, dir, dist, footprint, b ? z : 0);
+        target.copy(fit.target);
+        const freeW = Math.max(1,this.w-this.offsetPx), freeH = Math.max(1,this.h-this.bottomInset-this.topInset);
+        const tan = .5 * (this.h+this.offsetY) * Math.max(fit.sx/((portrait ? .905 : .85)*freeW), fit.sy/(.84*freeH));
+        fov = 2 * Math.atan(tan) / DEG;
+      } else if (v.group !== 'street' && (v.group !== 'detail' || name === 'inverter')) {
         // Widen the lens in portrait. Moving hundreds of metres away would put the
         // mobile overview inside the satellite terrain's atmospheric fade.
         fov = 2 * Math.atan(Math.tan(fov * DEG / 2) * this.fitFactor()) / DEG;
@@ -349,12 +487,13 @@ export class CameraRig {
   stopDrone() { if (this.controls.autoRotate) { this.controls.autoRotate = false; this._emit('drone', false); } }
 
   /** Fly to an arbitrary point (e.g. a module), looking from the current direction. */
-  focusOn(worldPoint, dist = 14, { duration = 1.0 } = {}) {
+  focusOn(worldPoint, dist, { duration = 0.5 } = {}) {
     this.cancelAnim();
     this.stopDrone();
     if (this.mode === 'ortho' && this.camera.position.clone().sub(this.controls.target).normalize().y < 0.95) this.setMode('persp');
     const from = this.getState();
-    const to = { ...from, target: worldPoint.clone(), dist, phi: Math.min(from.phi, 1.05) };
+    const to = { ...from, target: worldPoint.clone(), dist: dist ?? Math.max(12, from.dist / 2),
+      phi: dist === undefined ? from.phi : Math.min(from.phi, 1.05) };
     this.currentView = null; this._emit('view', null);
     return new Promise((resolve) => {
       this.anim = { from, to, dTheta: 0, t: 0, duration, resolve };

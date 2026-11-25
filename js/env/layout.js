@@ -1,6 +1,7 @@
 import { distToPolyline, rng } from './util.js';
 
 // assumed landscape and parking layout. All setbacks are in plan metres.
+export const bounds=[-87,-126,151,176]; // covers the entire compound, apron and gate throat
 export const ringWidth = 6;
 export const bays = { start: -63.5, width: 2.65, count: 18, back: -99.2, depth: 4.9 };
 export function westVerge(site) {
@@ -16,22 +17,33 @@ export function roadAt(site, y) {
   return line[y > line[0][1] ? 0 : line.length - 1][0];
 }
 
-export function planting(site) {
+export async function planting(site, breathe) {
+  let start=performance.now();
   const rand = rng(2083), trees = [], palms = [], shrubs = [];
   const verge = westVerge(site);
   const outlines = site.ROOF.polygons.map(p => [...p.outer, p.outer[0]]);
   const inCompound = (x,y) => site.pointInRing(x,y,site.COMPOUND.polygon);
-  const southSetback = (x,y) => outlines.some(ring => {
-    for (let i = 1; i < ring.length; i++) {
-      const [ax,ay] = ring[i-1], [bx,by] = ring[i];
-      if (ay === by && x >= Math.min(ax,bx) && x <= Math.max(ax,bx) && y < ay && y >= ay-12) return true;
-    }
-    return false;
+  // Reject by bounds before visiting hundreds of traced edges for each shrub candidate.
+  const barriers = [...outlines, ...site.NEIGHBOURS.map(n => [...n.polygon, n.polygon[0]])].map(ring => {
+    const xs=ring.map(p=>p[0]), ys=ring.map(p=>p[1]);
+    return {ring, x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys)};
   });
+  const southEdges = outlines.flatMap(ring => ring.slice(1).flatMap(([bx,by],i) => {
+    const [ax,ay]=ring[i];
+    return ay===by ? [[Math.min(ax,bx),Math.max(ax,bx),ay]] : [];
+  }));
+  const southByX = new Map();
+  for(const edge of southEdges) {
+    for(let i=Math.floor(edge[0]/8);i<=Math.floor(edge[1]/8);i++) {
+      if(!southByX.has(i))southByX.set(i,[]);
+      southByX.get(i).push(edge);
+    }
+  }
   function clear(x, y, radius) {
-    if (site.pointInRing(x,y,site.COMPOUND.driveway) || southSetback(x,y)) return false;
-    if (site.NEIGHBOURS.some(n => site.pointInRing(x,y,n.polygon) || distToPolyline(x,y,[...n.polygon,n.polygon[0]]) < radius)) return false;
-    return outlines.every(r => !site.pointInRing(x,y,r) && distToPolyline(x,y,r) > radius);
+    if (site.pointInRing(x,y,site.COMPOUND.driveway) ||
+        southByX.get(Math.floor(x/8))?.some(([lo,hi,ay])=>x>=lo && x<=hi && y<ay && y>=ay-12)) return false;
+    return barriers.every(({ring,x0,x1,y0,y1}) => x<x0-radius || x>x1+radius || y<y0-radius || y>y1+radius ||
+      (!site.pointInRing(x,y,ring) && distToPolyline(x,y,ring)>radius));
   }
   // assumed: staggered neem-like shade trees and occasional palms in the west planting bed.
   for (let y = verge.y0+3; y < verge.y1-3; y += 6.9+rand()*2.1) {
@@ -60,7 +72,9 @@ export function planting(site) {
   for(let y=verge.y0+1; y<verge.y1-1; y+=1.35+rand()*.65)
     if(clear(verge.x0+.85,y,.4)) shrubs.push([verge.x0+.85,y,.58+rand()*.35,.64+rand()*.2]);
   // The open land follows the irregular east boundary. Keep the southern access track open.
+  await breathe();start=performance.now();
   for(let i=0; i<245; i++) {
+    if(i%24===0 && performance.now()-start>15){await breathe();start=performance.now();}
     const x=-60+rand()*205, y=-192+rand()*265;
     if(inCompound(x,y) || !clear(x,y,3) || (x<0 && y<-111 && (y>-128 || x<-51)) || x<61 && y>21) continue;
     if (distToPolyline(x,y,boundary)<4) continue;
@@ -75,6 +89,7 @@ export function planting(site) {
     tufts.push([x,y,.17+rand()*.33,.24+rand()*.42]);
   }
   for(const [x,y] of shrubs) {
+    if(performance.now()-start>15){await breathe();start=performance.now();}
     if(inCompound(x,y))continue;
     for(let j=0;j<2;j++) {
       const a=rand()*6.28,rad=.8+rand()*1.9;
@@ -84,11 +99,13 @@ export function planting(site) {
   }
   // assumed: thorn scrub colonises the stream banks in loose colonies. Actual
   // canopy density is sampled from the photograph when it is available.
-  function fieldSites(cover,quality) {
+  async function fieldSites(cover,quality) {
+    let slice=performance.now();
     const fieldRand=rng(8120), points=[];
     const permitted=(x,y)=>!inCompound(x,y) && clear(x,y,2.1) &&
       !(y< -112 && x< -39) && !(y>23 && x<62) && !(y>99 && x<83);
     for(let i=0;i<390;i++){
+      if(i%24===0 && performance.now()-slice>15){await breathe();slice=performance.now();}
       const x=-49+fieldRand()*248,y=-208+fieldRand()*394;
       const spread=3+fieldRand()*8, n=2+Math.floor(fieldRand()*7);
       for(let j=0;j<n;j++){
@@ -96,9 +113,10 @@ export function planting(site) {
         const px=x+Math.cos(a)*d,py=y+Math.sin(a)*d*.62;
         const h=.6+1.4*fieldRand()**1.8, rad=h*(.55+.52*fieldRand());
         const chance=fieldRand(), lod=fieldRand();
-        if(chance>cover(px,py)*.94 || (quality==='low' && lod>.32) ||
+        if((cover && chance>cover(px,py)*.94) || (quality==='low' && lod>.32) ||
            (quality==='medium' && lod>.69) || !permitted(px,py))continue;
-        points.push([px,py,h,rad]);
+        // The bake keeps the threshold so the live survey still decides each shrub.
+        points.push(cover?[px,py,h,rad]:[px,py,h,rad,chance]);
       }
     }
     return points;

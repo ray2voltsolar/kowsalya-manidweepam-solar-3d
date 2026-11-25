@@ -12,7 +12,7 @@ export function rainOutlets(site,rings) {
   }
   return out;
 }
-function installServices(K,rings) {
+function* installServices(K,rings) {
   const z=K.building.roofZ, fixtures=K.site.OBSTACLES;
   const roomEnds=[];
   const free=(x,y,source)=>{
@@ -45,10 +45,18 @@ function installServices(K,rings) {
   for(const o of fixtures.filter(o=>o.tank||o.type==='tank')) {
     const x=(o.x0+o.x1)/2,y=(o.y0+o.y1)/2;
     const starts=K.ports.get(o.id) || [[o.x0-.19,y],[o.x1+.19,y],[x,o.y0-.19],[x,o.y1+.19]].map(p=>({point:[...p,z+.22]}));
-    const candidates=starts.flatMap(port=>roomEnds.map(b=>({a:port.point,b,port,l:Math.abs(port.point[0]-b[0])+Math.abs(port.point[1]-b[1])})))
-      .filter(c=>c.l>.85&&c.l<16).sort((a,b)=>a.l-b.l);
+    const candidates=[];
+    for(const port of starts){
+      const a=port.point;
+      for(const b of roomEnds){
+        const l=Math.abs(a[0]-b[0])+Math.abs(a[1]-b[1]);
+        if(l>.85 && l<16)candidates.push({a,b,port,l});
+      }
+    }
+    candidates.sort((a,b)=>a.l-b.l);
     let done=false;
     for(const {a,b,port} of candidates) {
+      yield;
       for(const mid of [[a[0],b[1],a[2]],[b[0],a[1],a[2]]]) {
         if(!segmentFree(a,mid,o)||!segmentFree(mid,b,o))continue;
         const hi=o.type==='tank'?o.z0+.48:o.zTop+.12;
@@ -70,7 +78,9 @@ function installServices(K,rings) {
   // Short parallel distribution runs follow long, unobstructed parapet stretches.
   let count=0;
   for(const {es} of rings) for(const e of es) {
-    if(count>=6 || e.len<8)continue;
+    if(count>=6)return;
+    if(e.len<8)continue;
+    yield;
     const a=pt(e.f,.65,z+.22,-.36), b=pt(e.f,Math.min(e.len-.65,8.4),z+.22,-.36);
     if(!segmentFree(a,b))continue;
     lay(a,b);
@@ -78,7 +88,7 @@ function installServices(K,rings) {
     count++;
   }
 }
-export function buildTerraces(K,rings,drains) {
+export function buildTerraces(K,rings) {
   const z=K.building.roofZ, {height,thickness}=K.building.parapet;
   for(const p of K.site.ROOF.polygons)slice(K.roof,K.THREE,p,z,'#ffffff');
   for(const {es} of rings) {
@@ -87,9 +97,12 @@ export function buildTerraces(K,rings,drains) {
     ribbon(K.parapets,es,.033,-thickness-.033,z+height-.073,z+height,'#e2ded1');
     ribbon(K.parapets,es,-thickness,-thickness-.044,z+.009,z+.145,'#aaa393');
   }
+}
+export function* buildServices(K,rings,drains) {
+  const z=K.building.roofZ;
   for(const {x,y} of drains) {
     box(K.services,globalFrame,x-.127,x+.127,y-.127,y+.127,z+.001,z+.009,'#66675e');
     if(!K.low)for(let j=-3;j<=3;j++)box(K.services,globalFrame,x+j*.029-.005,x+j*.029+.005,y-.115,y+.115,z+.009,z+.015,'#98998b');
   }
-  if(!K.low)installServices(K,rings);
+  if(!K.low)yield* installServices(K,rings);
 }

@@ -145,14 +145,15 @@ export async function takeScreenshot({ renderer, post, rig, labelObjs, caption, 
   const v = new THREE.Vector3();
   g.textBaseline = 'middle';
   for (const o of labelObjs) {
-    if (!o.visible || !o.parent || !o.parent.visible) continue;
+    if (!o.visible || !o.parent || !o.parent.visible || (rig.phone && o.element.classList.contains('lbl-hidden'))) continue;
     o.getWorldPosition(v); v.project(cam);
     if (v.z < -1 || v.z > 1 || Math.abs(v.x) > 1.05 || Math.abs(v.y) > 1.05) continue;
     const x = (v.x * 0.5 + 0.5) * W, y = (-v.y * 0.5 + 0.5) * H;
     const txt = o.element.querySelector('.lbl-txt');
     if (!txt) continue;
     const main = txt.childNodes[0] ? txt.childNodes[0].textContent : '';
-    const sub = txt.querySelector('.lbl-sub:not([hidden])')?.textContent || '';
+    const detail = txt.querySelector('.lbl-sub:not([hidden])');
+    const sub = detail && (!rig.phone || getComputedStyle(detail).display !== 'none') ? detail.textContent : '';
     g.font = `600 ${Math.round(13 * k)}px "Segoe UI", system-ui, sans-serif`;
     const w1 = g.measureText(main).width;
     g.font = `${Math.round(11 * k)}px "Segoe UI", system-ui, sans-serif`;
@@ -192,7 +193,9 @@ export async function takeScreenshot({ renderer, post, rig, labelObjs, caption, 
     half.getContext('2d').drawImage(out, 0, 0, half.width, half.height);
     blob = await new Promise((res) => half.toBlob(res, 'image/png'));
     W = half.width; H = half.height;
+    half.width = half.height = 0;
   }
+  out.width = out.height = 0;
   if (!blob) throw new Error('Could not encode PNG');
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');

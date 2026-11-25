@@ -17,7 +17,7 @@ function lamp(B,x,y,h,dx,dy) {
   box(B,'metal','#686d68',end[0],end[1],end[2]-.035,.59,.245,.10,rot);
   box(B,'paint','#d5d7c9',end[0]+dx*.04,end[1]+dy*.04,end[2]-.055,.43,.18,.023,rot);
 }
-export function buildPoles(ctx,B){
+export function* buildPoles(ctx,B){
   const {ROAD,COMPOUND}=ctx.site;
   const [a,b]=COMPOUND.driveway;
   for(const t of [.20,.51,.83]){
@@ -29,6 +29,7 @@ export function buildPoles(ctx,B){
     const a=r[i-1],b=r[i],len=Math.hypot(b[0]-a[0],b[1]-a[1]),tx=(b[0]-a[0])/len,ty=(b[1]-a[1])/len;
     const nx=ty,ny=-tx;
     while(next<base+len){
+      yield;
       const p=mix(a,b,(next-base)/len),x=p[0]+nx*(ROAD.width/2+1.15),y=p[1]+ny*(ROAD.width/2+1.15);
       lamp(B,x,y,7.25,-nx,-ny); // assumed roadside lighting on west verge
       const ox=x+nx*1.03,oy=y+ny*1.03,h=8.7;

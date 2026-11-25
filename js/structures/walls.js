@@ -3,7 +3,7 @@ import { edges, mix, box, edgeBar, pipe, bar } from './geometry.js';
 
 const cement='#d7cdbb',cap='#e3dacb',iron='#676861',basalt='#8a8071';
 // assumed: plaster pier rhythm, weathering plinth, top grille and entrance finishes.
-function wallRun(B,a,b,h,low) {
+function* wallRun(B,a,b,h,low) {
   const len=Math.hypot(b[0]-a[0],b[1]-a[1]);
   if(len<.15)return;
   const n=Math.max(1,Math.round(len/3.1)), rot=Math.atan2(b[1]-a[1],b[0]-a[0]);
@@ -13,6 +13,7 @@ function wallRun(B,a,b,h,low) {
   edgeBar(B,'paving',cap,a,b,masonry-.035,.31,.095);
   for(const level of [masonry+.10,h-.07])edgeBar(B,'metal',iron,a,b,level,.041,.043);
   for(let j=0;j<n;j++){
+    if(j%4===0)yield;
     const p=mix(a,b,j/n);
     box(B,'render','#c1b6a3',...p,0,.36,.35,h+.02,rot);
     box(B,'paving',cap,...p,h+.02,.43,.42,.075,rot);
@@ -89,16 +90,16 @@ function gate(B,site){
   }
 }
 
-export function buildWalls(ctx,B){
+export function* buildWalls(ctx,B){
   const {polygon,wallHeight,gate:g}=ctx.site.COMPOUND;
   for(const [a,b] of edges(polygon)){
     const dx=b[0]-a[0],dy=b[1]-a[1],len=Math.hypot(dx,dy),t=((g.x-a[0])*dx+(g.y-a[1])*dy)/(len*len);
     const near=mix(a,b,t);
     if(t>0&&t<1&&Math.hypot(near[0]-g.x,near[1]-g.y)<.01){
       const cut=(g.width/2+.28)/len;
-      wallRun(B,a,mix(a,b,t-cut),wallHeight,ctx.quality==='low');
-      wallRun(B,mix(a,b,t+cut),b,wallHeight,ctx.quality==='low');
-    }else wallRun(B,a,b,wallHeight,ctx.quality==='low');
+      yield* wallRun(B,a,mix(a,b,t-cut),wallHeight,ctx.quality==='low');
+      yield* wallRun(B,mix(a,b,t+cut),b,wallHeight,ctx.quality==='low');
+    }else yield* wallRun(B,a,b,wallHeight,ctx.quality==='low');
   }
   gate(B,ctx.site);
 }

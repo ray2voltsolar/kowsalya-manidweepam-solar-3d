@@ -1,7 +1,8 @@
-import { rng, makeCanvas, GeoBuilder, addTube, completeMips, patchFoliage, heightToNormal, fbm } from './util.js';
+import { packedTexture, cachedGeometry } from './procedural-cache.js';
+import { rng, makeCanvas, canvasTexture, GeoBuilder, addTube, completeMips, patchFoliage, fbm } from './util.js';
 
 import { planting } from './layout.js';
-const QT = { high: { frondSeg: 12, tex: 1024, trunkRad: 9 }, medium: { frondSeg: 9, tex: 512, trunkRad: 7 }, low: { frondSeg: 6, tex: 256, trunkRad: 6 } };
+const QT = { high: { frondSeg: 12, trunkRad: 9 }, medium: { frondSeg: 9, trunkRad: 7 }, low: { frondSeg: 6, trunkRad: 6 } };
 
 // ---------------------------------------------------------------------------
 // textures
@@ -41,42 +42,55 @@ function frondTexture(THREE, size) {
     g.fillStyle = `rgb(${150 - v * 50 | 0},${150 - v * 40 | 0},${70 - v * 20 | 0})`;
     g.fillRect(W / 2 - w / 2, Y(v) - 2, w, 4);
   }
-  const t = new THREE.CanvasTexture(c);
+  const t = canvasTexture(THREE,c);
   t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
   return t;
 }
 
-function barkTexture(THREE, palm) {
-  const W = 128, H = 256;
-  const c = makeCanvas(W, H); const g = c.getContext('2d');
-  const h = makeCanvas(W, H); const hg = h.getContext('2d');
-  const img = g.createImageData(W, H), hi = hg.createImageData(W, H);
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    const u = x / W, v = y / H;
-    let ht, col;
-    if (palm) {
-      // leaf-scar rings: ~9 per texture repeat (0.9 m), slightly wavy
-      const ring = (v * 9 + 0.05 * Math.sin(u * Math.PI * 2 * 2 + v * 20)) % 1;
-      const groove = Math.exp(-((ring - 0.15) ** 2) / 0.004);
-      const n = fbm(u * 8, v * 16, 3, 5, 8);
-      ht = 0.7 - groove * 0.6 + n * 0.25;
-      const l = 0.55 + n * 0.35 - groove * 0.3;
-      col = [128 * l + 20, 118 * l + 18, 104 * l + 14];
-    } else {
-      const n = fbm(u * 6, v * 3, 4, 9, 6), m = fbm(u * 20, v * 4, 2, 3, 20);
-      const fiss = Math.abs(Math.sin((u * 7 + n * 0.8) * Math.PI));
-      ht = fiss * 0.7 + m * 0.3;
-      const l = 0.45 + fiss * 0.35 + m * 0.2;
-      col = [96 * l + 20, 84 * l + 18, 70 * l + 14];
+async function barkTexture(ctx, palm) {
+  const {THREE} = ctx, W = 128, H = 256;
+  const rgb = new Uint8ClampedArray(W*H*4), height = new Uint8ClampedArray(W*H);
+  for (let y = 0; y < H; y++) {
+    if (y && y % 64 === 0) await ctx.breathe();
+    for (let x = 0; x < W; x++) {
+      const u = x / W, v = y / H;
+      let ht, col;
+      if (palm) {
+        // leaf-scar rings: ~9 per texture repeat (0.9 m), slightly wavy
+        const ring = (v * 9 + 0.05 * Math.sin(u * Math.PI * 2 * 2 + v * 20)) % 1;
+        const groove = Math.exp(-((ring - 0.15) ** 2) / 0.004);
+        const n = fbm(u * 8, v * 16, 3, 5, 8);
+        ht = 0.7 - groove * 0.6 + n * 0.25;
+        const l = 0.55 + n * 0.35 - groove * 0.3;
+        col = [128 * l + 20, 118 * l + 18, 104 * l + 14];
+      } else {
+        const n = fbm(u * 6, v * 3, 4, 9, 6), m = fbm(u * 20, v * 4, 2, 3, 20);
+        const fiss = Math.abs(Math.sin((u * 7 + n * 0.8) * Math.PI));
+        ht = fiss * 0.7 + m * 0.3;
+        const l = 0.45 + fiss * 0.35 + m * 0.2;
+        col = [96 * l + 20, 84 * l + 18, 70 * l + 14];
+      }
+      const i = (y * W + x) * 4;
+      rgb[i] = col[0]; rgb[i+1] = col[1]; rgb[i+2] = col[2]; rgb[i+3] = 255;
+      height[y*W+x] = ht*255;
     }
-    const i = (y * W + x) * 4;
-    img.data[i] = col[0]; img.data[i + 1] = col[1]; img.data[i + 2] = col[2]; img.data[i + 3] = 255;
-    hi.data[i] = hi.data[i + 1] = hi.data[i + 2] = ht * 255; hi.data[i + 3] = 255;
   }
-  g.putImageData(img, 0, 0); hg.putImageData(hi, 0, 0);
-  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  const nt = new THREE.CanvasTexture(heightToNormal(h, 3)); nt.wrapS = nt.wrapT = THREE.RepeatWrapping;
-  return { map: completeMips(t), normalMap: completeMips(nt) };
+  const normal = new Uint8ClampedArray(rgb.length);
+  for (let y=0; y<H; y++) for (let x=0; x<W; x++) {
+    const dx=(height[y*W+(x+1)%W]-height[y*W+(x+W-1)%W])*3/255;
+    const dy=(height[((y+1)%H)*W+x]-height[((y+H-1)%H)*W+x])*3/255;
+    const scale=127.5/Math.sqrt(dx*dx+dy*dy+1), i=(y*W+x)*4;
+    normal[i]=127.5-dx*scale; normal[i+1]=127.5-dy*scale;
+    normal[i+2]=127.5+scale; normal[i+3]=255;
+  }
+  function map(pixels, srgb) {
+    const texture=new THREE.DataTexture(new Uint8Array(pixels.buffer),W,H);
+    if(srgb) texture.colorSpace=THREE.SRGBColorSpace;
+    texture.flipY=true; texture.wrapS=texture.wrapT=THREE.RepeatWrapping;
+    texture.magFilter=THREE.LinearFilter;texture.minFilter=THREE.LinearMipmapLinearFilter;
+    return completeMips(texture);
+  }
+  return {map: map(rgb,true), normalMap: map(normal,false)};
 }
 
 // ---------------------------------------------------------------------------
@@ -292,7 +306,7 @@ function sprayTexture(THREE,size) {
       }
     }
   }
-  const t=new THREE.CanvasTexture(c);t.colorSpace=THREE.SRGBColorSpace;t.anisotropy=4;return t;
+  const t=canvasTexture(THREE,c);t.colorSpace=THREE.SRGBColorSpace;t.anisotropy=4;return t;
 }
 
 // A whole twig spray per card keeps the fine, torn silhouette of low thorn
@@ -319,7 +333,7 @@ function thornTexture(THREE,size) {
     }
   }
   for(let i=0;i<9;i++)twig(.46+rand()*.12,.97,(i-4)*.060+(rand()-.5)*.047,-.30-rand()*.18,2);
-  const t=new THREE.CanvasTexture(canvas);
+  const t=canvasTexture(THREE,canvas);
   t.colorSpace=THREE.SRGBColorSpace;t.anisotropy=4;return t;
 }
 
@@ -339,15 +353,27 @@ function thornCrown(low) {
   return gb;
 }
 
-export function buildTrees(ctx,parent) {
+export async function buildTrees(ctx,parent,pack=null,geometryPack=null) {
   const {THREE,site}=ctx,q=QT[ctx.quality]||QT.high,low=ctx.quality==='low';
-  const positions=planting(site),r=rng(463);
-  const bark=barkTexture(THREE,false);
+  const r=rng(463);
+  let positions;
+  if(geometryPack?.planting) {
+    positions=JSON.parse(new TextDecoder().decode(geometryPack.planting.levels[0]));
+    positions.fieldSites=cover=>positions.field.filter(([x,y,h,radius,chance])=>chance<=.94*cover(x,y))
+      .map(([x,y,h,radius])=>[x,y,h,radius]);
+  } else positions=await planting(site,ctx.breathe);
+  function cached(key, bark=false) {
+    const t=packedTexture(THREE,pack[key],true);
+    if(!key.endsWith('Normal')) t.colorSpace=THREE.SRGBColorSpace;
+    if(bark) t.wrapS=t.wrapT=THREE.RepeatWrapping;
+    else t.anisotropy=Math.min(ctx.maxAnisotropy,4);
+    return t;
+  }
+  const bark=pack?{map:cached('bark',true),normalMap:cached('barkNormal',true)}:await barkTexture(ctx,false);
   const trunk=new THREE.MeshStandardMaterial({map:bark.map,normalMap:bark.normalMap,roughness:.95,color:0xc2b7a0});
-  const leafMap=sprayTexture(THREE,low?256:384);
+  const leafMap=pack?cached('spray'):sprayTexture(THREE,384);
   function foliage(map) {
-    completeMips(map);
-    const mat=new THREE.MeshStandardMaterial({map,roughness:.87,side:THREE.DoubleSide,alphaTest:.31,vertexColors:true});
+    const mat=new THREE.MeshStandardMaterial({map,roughness:.87,side:THREE.DoubleSide,alphaToCoverage:true,alphaTest:.31,vertexColors:true});
     return patchFoliage(mat);
   }
   const crown=foliage(leafMap);
@@ -356,7 +382,7 @@ export function buildTrees(ctx,parent) {
   };
   function instances(gb,mat,points,name,color,scaleH,scaleR) {
     if(!points.length)return;
-    const mesh=new THREE.InstancedMesh(gb.build(THREE,{color}),mat,points.length);
+    const mesh=new THREE.InstancedMesh(gb.isBufferGeometry?gb:gb.build(THREE,{color}),mat,points.length);
     const o=new THREE.Object3D();
     points.forEach(([x,y,h,rad,az,tint],i)=>{
       o.position.set(x,0,-y);o.rotation.y=az;o.scale.set(rad/scaleR,h/scaleH,rad/scaleR);o.updateMatrix();
@@ -368,20 +394,36 @@ export function buildTrees(ctx,parent) {
   const treeSites=positions.trees.filter(([x,y],i)=>!low || site.pointInRing(x,y,site.COMPOUND.polygon) || i%3!==1);
   const trees=withVariation(treeSites,[0xe0dfb4,0xc9d3b6,0xfcf0c3,0xcfddc0]);
   for(let i=0;i<3;i++){
+    await ctx.breathe();
     const pts=trees.filter((p,index)=>index%3===i);
-    const wood=new GeoBuilder(), leaves=new GeoBuilder();
-    buildBroadleaf(wood,leaves,739+i*119,ctx.quality);
-    instances(wood,trunk,pts,'Shade trees · branches '+i,false,8,3.4);
-    instances(leaves,crown,pts,'Shade trees · foliage '+i,true,8,3.4);
+    const woodName='Shade trees · branches '+i, leafName='Shade trees · foliage '+i;
+    let wood,leaves;
+    if (geometryPack) {
+      wood=cachedGeometry(THREE,geometryPack,woodName);
+      leaves=cachedGeometry(THREE,geometryPack,leafName);
+    } else {
+      wood=new GeoBuilder();leaves=new GeoBuilder();
+      buildBroadleaf(wood,leaves,739+i*119,ctx.quality);
+    }
+    instances(wood,trunk,pts,woodName,false,8,3.4);
+    instances(leaves,crown,pts,leafName,true,8,3.4);
   }
   if(positions.palms.length){
-    const wood=new GeoBuilder(),leaves=new GeoBuilder(),nuts=new GeoBuilder();
-    positions.palms.forEach(([x,y,h],i)=>buildPalm(wood,leaves,nuts,x,y,h,284+i,q));
-    const palmBark=barkTexture(THREE,true);
-    add(new THREE.Mesh(wood.build(THREE),new THREE.MeshStandardMaterial({map:palmBark.map,normalMap:palmBark.normalMap,roughness:.94})),'Avenue palms · trunks');
-    add(new THREE.Mesh(leaves.build(THREE,{color:true}),foliage(frondTexture(THREE,q.tex))),'Avenue palms · fronds');
-    add(new THREE.Mesh(nuts.build(THREE,{color:true}),new THREE.MeshStandardMaterial({vertexColors:true,roughness:.8})),'Avenue palms · leaf bases');
+    let wood,leaves,nuts;
+    if(geometryPack){
+      [wood,leaves,nuts]=['trunks','fronds','leaf bases'].map(part=>
+        cachedGeometry(THREE,geometryPack,'Avenue palms · '+part));
+    } else {
+      const branches=new GeoBuilder(),fronds=new GeoBuilder(),bases=new GeoBuilder();
+      positions.palms.forEach(([x,y,h],i)=>buildPalm(branches,fronds,bases,x,y,h,284+i,q));
+      wood=branches.build(THREE);leaves=fronds.build(THREE,{color:true});nuts=bases.build(THREE,{color:true});
+    }
+    const palmBark=pack?{map:cached('palm',true),normalMap:cached('palmNormal',true)}:await barkTexture(ctx,true);
+    add(new THREE.Mesh(wood,new THREE.MeshStandardMaterial({map:palmBark.map,normalMap:palmBark.normalMap,roughness:.94})),'Avenue palms · trunks');
+    add(new THREE.Mesh(leaves,foliage(pack?cached('frond'):frondTexture(THREE,ctx.textureQuality==='high'?1024:512))),'Avenue palms · fronds');
+    add(new THREE.Mesh(nuts,new THREE.MeshStandardMaterial({vertexColors:true,roughness:.8})),'Avenue palms · leaf bases');
   }
+  await ctx.breathe();
   const shrubCards=new GeoBuilder();
   addCrown(shrubCards,0,.49,0,.88,.38,low?17:ctx.quality==='medium'?30:43,.72,638,[1,.96,.78]);
   const tuft=new GeoBuilder();
@@ -401,10 +443,10 @@ export function buildTrees(ctx,parent) {
   const shrubs=positions.shrubs.filter((p,i)=>!low||i%3!==0);
   const shrubHeight=Math.max(...shrubCards.p.filter((_,i)=>i%3===1));
   instances(shrubCards,crown,withVariation(shrubs,[0xf1deac,0xc5cfa3,0xb9c891,0xe4d1aa]),'Garden shrubs and seasonal scrub',true,shrubHeight,1);
-  return cover=>{
-    const points=positions.fieldSites(cover,ctx.quality);
+  return async cover=>{
+    const points=await positions.fieldSites(cover,ctx.quality);
     if(!points.length)return;
-    const fieldMaterial=foliage(thornTexture(THREE,low?128:256));
+    const fieldMaterial=foliage(pack?cached('thorn'):thornTexture(THREE,256));
     const palette=[0xe1d9b4,0xd3c7a2,0xd1c080,0xafb396,0xf1dab2];
     instances(thornCrown(low),fieldMaterial,withVariation(points,palette),'Dry thorn scrub on stream banks',true,1,1);
   };

@@ -10,8 +10,6 @@ import { laminateGeometry, frameGeometry, backDetailGeometry } from './module.js
 import { makeCellTexture, makeBackTexture, rng } from './textures.js';
 import { W, WD } from './geom.js';
 import { buildStructure } from './structure.js';
-import { buildBOS } from './bos.js';
-import { buildInverterStations } from './inverter.js';
 
 export async function buildSolar(ctx) {
   const { THREE, site } = ctx;
@@ -23,7 +21,7 @@ export async function buildSolar(ctx) {
   const aniso = Math.min(ctx.maxAnisotropy || 1, 16);
 
   // ---------------------------------------------------------------- materials
-  const texH = Q === 'low' ? 512 : Q === 'medium' ? 1536 : 4096;
+  const texH = ctx.textureQuality === 'high' ? 2048 : 1536;
   const cellMap = makeCellTexture(texH, aniso, MOD);
   const backMap = makeBackTexture(Math.max(256, texH / 2), aniso, MOD);
 
@@ -132,48 +130,72 @@ roughnessFactor = mix(roughnessFactor, 0.85, pvDust * 0.6);`)
   const aVar = new THREE.InstancedBufferAttribute(varArr, 4);
   lamGeo.setAttribute('aTint', aTint); lamGeo.setAttribute('aVar', aVar);
 
-  const gridKey = (t,r,c) => t + '/' + r + '/' + c;
-  const stringsAt = new Map(modules.map(m => [gridKey(m.table,m.row,m.col),m.stringIndex]));
   const edges = new Float32Array(N*4);
-  for (const m of modules) {
-    const border = (dr,dc) => Number(stringsAt.get(gridKey(m.table,m.row+dr,m.col+dc)) !== m.stringIndex);
-    edges.set([border(0,-1),border(-1,0),border(0,1),border(1,0)],m.index*4);
+  let first=0;
+  for (const table of site.TABLES) {
+    const {cols,rows}=table;
+    for (let row=0;row<rows;row++) for (let col=0;col<cols;col++) {
+      const i=first+row*cols+col, id=modules[i].stringIndex, e=i*4;
+      edges[e]   = col===0      || modules[i-1].stringIndex!==id;
+      edges[e+1] = row===0      || modules[i-cols].stringIndex!==id;
+      edges[e+2] = col===cols-1 || modules[i+1].stringIndex!==id;
+      edges[e+3] = row===rows-1 || modules[i+cols].stringIndex!==id;
+    }
+    first+=cols*rows;
   }
   lamGeo.setAttribute('aStringEdges',new THREE.InstancedBufferAttribute(edges,4));
   const moduleMesh = new THREE.InstancedMesh(lamGeo, [glassMat, backMat], N);
   moduleMesh.name = 'pv-modules';
   moduleMesh.renderOrder = 1;
   const frameMesh = new THREE.InstancedMesh(frameGeometry(MOD, Q), frameMat, N); frameMesh.name = 'pv-frames';
-  const backMesh = new THREE.InstancedMesh(backDetailGeometry(MOD, Q), blackMat, N);
-
-  const mtx = new THREE.Matrix4();
-  modules.forEach((m, i) => {
-    const U = WD(m.u), Nn = WD(m.n), V = WD(m.v).negate();
-    mtx.makeBasis(U, Nn, V).setPosition(W(m.center));
-    moduleMesh.setMatrixAt(i, mtx); frameMesh.setMatrixAt(i, mtx); backMesh.setMatrixAt(i, mtx);
-  });
-  for (const im of [moduleMesh, frameMesh, backMesh]) {
-    im.instanceMatrix.needsUpdate = true; im.castShadow = true; im.receiveShadow = true;
-    im.computeBoundingBox(); im.computeBoundingSphere();
-    group.add(im);
+  const {u,v,n} = site.ARRAY_AXES;
+  const matrix = new THREE.Matrix4().makeBasis(WD(u),WD(n),WD(v).negate());
+  for (let i = 0; i < N; i++) {
+    const [x,y,z] = modules[i].center;
+    moduleMesh.setMatrixAt(i,matrix.setPosition(x,z,-y));
   }
-  backMesh.castShadow = false; backMesh.name = 'pv-junction-boxes-and-leads';
+  // The laminate, frame and clipped leads have identical instance transforms.
+  frameMesh.instanceMatrix = moduleMesh.instanceMatrix;
+  for (const mesh of [moduleMesh,frameMesh]) {
+    mesh.castShadow = mesh.receiveShadow = true;
+    group.add(mesh);
+  }
   moduleMesh.userData.occluderCategory = 'solar';
   ctx.registerOccluder && ctx.registerOccluder(moduleMesh);
 
   const structure = buildStructure(ctx);
   group.add(structure.group);
   const parts = { frameMesh, structure, bos: null, inverter: null };
-  try {
-    const bos = buildBOS(ctx, modules);
-    group.add(bos.group);
-    parts.bos = bos;
-  } catch (error) { console.warn('Solar cable equipment unavailable', error); }
-  try {
-    const inv = buildInverterStations(ctx);
-    group.add(inv.group);
-    parts.inverter = inv;
-  } catch (error) { console.warn('Solar inverter stations unavailable', error); }
+  let finished;
+  function finish() {
+    return (finished ??= finishDetails());
+  }
+  async function finishDetails() {
+    await ctx.breathe();
+    const backMesh = new THREE.InstancedMesh(backDetailGeometry(MOD,Q),blackMat,N);
+    backMesh.instanceMatrix = moduleMesh.instanceMatrix;
+    backMesh.name = 'pv-junction-boxes-and-leads';
+    backMesh.receiveShadow = true;
+    group.add(backMesh);
+    ctx.invalidate();
+    await ctx.breathe();
+    await structure.finish();
+
+    stringsOverlay = buildStringsOverlay();
+    stringsOverlay.visible = mode === 'strings';
+    if (stringsOverlay.visible) ctx.invalidate();
+    await ctx.breathe();
+
+    const {buildInverterStations} = await import('./inverter.js');
+    parts.inverter = await buildInverterStations(ctx);
+    group.add(parts.inverter.group);
+    ctx.invalidate();
+    await ctx.breathe();
+    const {buildBOS} = await import('./bos.js');
+    parts.bos = await buildBOS(ctx,modules);
+    group.add(parts.bos.group);
+    ctx.invalidate();
+  }
 
   const STR_PAL = site.STRING_COLORS;
   // Both overlays share module-local coordinates measured from the SW glass corner.
@@ -181,7 +203,7 @@ roughnessFactor = mix(roughnessFactor, 0.85, pvDust * 0.6);`)
     return W(m.corners[0]).addScaledVector(WD(m.u),u).addScaledVector(WD(m.v),v).addScaledVector(WD(m.n),offset);
   }
   const LBL_K = 0.018, LBL_MIN = 0.8, LBL_MAX = 2.6;   // label half-width = clamp(depth·K, MIN, MAX) metres
-  const stringsOverlay = buildStringsOverlay();
+  let stringsOverlay;
   function buildStringsOverlay() {
     const g = new THREE.Group(); g.name = 'pv-strings-overlay'; g.visible = false;
     // labels: one atlas + one billboard mesh (single draw call), size grows with distance (clamped)
@@ -334,8 +356,8 @@ roughnessFactor = mix(roughnessFactor, 0.85, pvDust * 0.6);`)
   let mode = 'normal';
   function setColorMode(m, values) {
     mode = m || 'normal';
-    stringsOverlay.visible = mode === 'strings';
-    uStrings.value = stringsOverlay.visible ? 1 : 0;
+    if (stringsOverlay) stringsOverlay.visible = mode === 'strings';
+    uStrings.value = mode === 'strings' ? 1 : 0;
     if (mode !== 'heatmap') worstRings.visible = false;
     baseTint.fill(0);
     if (mode === 'strings' || mode === 'inverters') {
@@ -382,7 +404,7 @@ roughnessFactor = mix(roughnessFactor, 0.85, pvDust * 0.6);`)
 
   group.userData.solarApi = { setColorMode, highlight, worstModules: () => worstList.slice(), get heatScale() { return heatScale; } };
   return {
-    group, modules, moduleMesh, setColorMode, setVisible, highlight, pick, info, parts,
+    group, finish, modules, moduleMesh, setColorMode, setVisible, highlight, pick, info, parts,
     // heat-map scale for the legend: colour ramp spans 0 … heatScale (fraction shaded); legend ticks = heatTicks()
     get heatScale() { return heatScale; },
     heatTicks: () => [0, 0.25, 0.5, 0.75, 1].map((f) => f * heatScale),

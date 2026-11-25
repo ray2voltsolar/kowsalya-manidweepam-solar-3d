@@ -1,3 +1,4 @@
+import {grain,surfaceSizes} from './surfaces.js';
 import {rng,edges} from './lib.js';
 
 function canvas(size) {
@@ -6,17 +7,9 @@ function canvas(size) {
 }
 function tex(ctx,g,repeat) {
   const T=ctx.THREE,t=new T.CanvasTexture(g.canvas);
-  t.colorSpace=T.SRGBColorSpace; t.anisotropy=Math.min(ctx.maxAnisotropy||1,8);
+  t.colorSpace=T.SRGBColorSpace; t.anisotropy=Math.min(ctx.maxAnisotropy,16); t.minFilter=T.LinearMipmapLinearFilter;
   if(repeat) {t.wrapS=t.wrapT=T.RepeatWrapping; t.repeat.setScalar(1/repeat);}
   return t;
-}
-function grain(g,rnd,strength) {
-  const w=g.canvas.width, data=g.getImageData(0,0,w,w);
-  for(let i=0;i<data.data.length;i+=4) {
-    const k=(rnd()+rnd()-1)*strength;
-    for(let j=0;j<3;j++) data.data[i+j]+=k;
-  }
-  g.putImageData(data,0,0);
 }
 function noiseLayer(g,rnd,grid,opacity) {
   const n=canvas(grid),im=n.createImageData(grid,grid);
@@ -27,9 +20,10 @@ function noiseLayer(g,rnd,grid,opacity) {
   n.putImageData(im,0,0);
   g.save(); g.globalAlpha=opacity; g.imageSmoothingEnabled=true;
   g.drawImage(n.canvas,0,0,g.canvas.width,g.canvas.height); g.restore();
+  n.canvas.width=n.canvas.height=1;
 }
 export function plaster(ctx) {
-  const g=canvas(ctx.quality==='low'?128:512), s=g.canvas.width,r=rng(255);
+  const g=canvas(surfaceSizes[ctx.textureQuality].plaster), s=g.canvas.width,r=rng(255);
   g.fillStyle='#f5f3ef'; g.fillRect(0,0,s,s);
   noiseLayer(g,r,12,.09); noiseLayer(g,r,45,.06);
   for(let i=0;i<350;i++) {
@@ -37,29 +31,37 @@ export function plaster(ctx) {
     const grad=g.createLinearGradient(x,y,x,y+h); grad.addColorStop(0,'rgba(99,86,70,.055)'); grad.addColorStop(1,'rgba(99,86,70,0)');
     g.fillStyle=grad;g.fillRect(x,y,w,h);
   }
-  grain(g,r,12); return tex(ctx,g,3.4); // assumed plaster repeat in metres
+  grain(g,12,()=>r()+r()); return tex(ctx,g,3.4); // assumed plaster repeat in metres
 }
 
 // Local runoff below a sill. Alpha tapers at every boundary so the decal has no visible rectangle.
 export function runoff(ctx) {
-  const g=canvas(ctx.quality==='low'?128:256),r=rng(681),s=g.canvas.width;
+  const g=canvas(surfaceSizes[ctx.textureQuality].runoff),r=rng(681),s=g.canvas.width;
   const im=g.createImageData(s,s);
   const traces=Array.from({length:34},()=>({x:r(),w:.006+r()*.038,h:.12+r()*.86,a:.035+r()*.18}));
-  for(let y=0;y<s;y++)for(let x=0;x<s;x++){
-    const u=x/s,v=y/s;let a=0;
-    for(const t of traces) {
+  const row=new Float64Array(s);
+  for(let y=0;y<s;y++){
+    const v=y/s;
+    row.fill(0);
+    for(const t of traces){
       if(v>t.h)continue;
-      const dx=(u-t.x-.008*Math.sin(9*v+t.x*15))/t.w;
-      if(Math.abs(dx)<2)a+=Math.exp(-dx*dx*2)*t.a*Math.pow(1-v/t.h,1.35);
+      const center=t.x+.008*Math.sin(9*v+t.x*15), opacity=t.a*Math.pow(1-v/t.h,1.35);
+      const lo=Math.max(0,Math.ceil((center-2*t.w)*s)),hi=Math.min(s,(center+2*t.w)*s);
+      for(let x=lo;x<hi;x++){
+        const dx=(x/s-center)/t.w;
+        row[x]+=Math.exp(-dx*dx*2)*opacity;
+      }
     }
-    const i=(y*s+x)*4;
-    im.data[i]=86;im.data[i+1]=78;im.data[i+2]=61;
-    im.data[i+3]=255*Math.min(.58,a)*Math.min(1,u*24,(1-u)*24,v*80)*(r()*.31+.69);
+    for(let x=0;x<s;x++){
+      const u=x/s,i=(y*s+x)*4;
+      im.data[i]=86;im.data[i+1]=78;im.data[i+2]=61;
+      im.data[i+3]=255*Math.min(.58,row[x])*Math.min(1,u*24,(1-u)*24,v*80)*(r()*.31+.69);
+    }
   }
   g.putImageData(im,0,0);return tex(ctx,g);
 }
 export function glazing(ctx) {
-  const g=canvas(ctx.quality==='low'?512:1024), c=g.canvas.width/4, r=rng(4291);
+  const g=canvas(surfaceSizes[ctx.textureQuality].windows), c=g.canvas.width/4, r=rng(4291);
   for(let i=0;i<16;i++) {
     g.save();g.translate((i%4)*c,Math.floor(i/4)*c);g.scale(c/256,c/256);
     g.beginPath();g.rect(0,0,256,256);g.clip();
@@ -115,7 +117,7 @@ export function terraceTexture(ctx,drains) {
   const ps=ctx.site.ROOF.polygons, pts=ps.flatMap(p=>p.outer);
   const x0=Math.floor(Math.min(...pts.map(p=>p[0])))-2,y0=Math.floor(Math.min(...pts.map(p=>p[1])))-2;
   const span=Math.ceil(Math.max(Math.max(...pts.map(p=>p[0]))-x0,Math.max(...pts.map(p=>p[1]))-y0))+2;
-  const s=ctx.quality==='high'?2048:ctx.quality==='medium'?1536:1024, g=canvas(s),r=rng(5080), scale=s/span;
+  const s=surfaceSizes[ctx.textureQuality].screed, g=canvas(s),r=rng(5080), scale=s/span;
   g.fillStyle='#b4a286';g.fillRect(0,0,s,s);
   const U=x=>(x-x0)*scale,V=y=>s-(y-y0)*scale;
   const line=(coords,color,w)=>{
@@ -151,7 +153,7 @@ export function terraceTexture(ctx,drains) {
       line([[x,y],[x+Math.cos(a)*l,y+Math.sin(a)*l]],'rgba(80,78,67,.08)',.045+r()*.09);
     }
   }
-  grain(g,r,11);
+  grain(g,11,()=>r()+r());
   const t=tex(ctx,g); t.repeat.set(1/span,1/span); t.offset.set(-x0/span,-y0/span);
   return t;
 }

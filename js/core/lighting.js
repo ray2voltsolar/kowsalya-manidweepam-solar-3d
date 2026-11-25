@@ -44,16 +44,19 @@ export class Lighting {
     const envGround = new THREE.Mesh(new THREE.CircleGeometry(400, 48), this.envGroundMat);
     envGround.rotation.x = -Math.PI / 2; envGround.position.y = -2;
     this.envScene.add(envGround);
-    this.pmrem = new THREE.PMREMGenerator(renderer);
+    this.revision = 0;
+    this.pmrem = null;
+    this.quality = quality;
+    this.hdr = renderer.extensions.has('EXT_color_buffer_float') || renderer.extensions.has('EXT_color_buffer_half_float');
     this.envRT = null;
     this._lastEnvDir = new THREE.Vector3(0, -1, 0);
     this._lastEnvTime = -1e9;
     this._envPending = false;
 
     // Tiny render target to read the true sky colour at the horizon (→ fog colour)
-    this.horizonRT = new THREE.WebGLRenderTarget(4, 4, { type: THREE.FloatType, depthBuffer: false });
+    this.horizonRT = new THREE.WebGLRenderTarget(16, 4, { type: renderer.extensions.has('EXT_color_buffer_float') ? THREE.FloatType : THREE.UnsignedByteType, depthBuffer: false });
     this.horizonCam = new THREE.PerspectiveCamera(20, 1, 0.1, 2000);
-    this._px = new Float32Array(4);
+    this._px = this.horizonRT.texture.type === THREE.FloatType ? new Float32Array(64) : new Uint8Array(64); // one row across all four views
 
     // --- Sun (also used as moonlight at night)
     const sun = new THREE.DirectionalLight(0xffffff, 4);
@@ -193,7 +196,28 @@ export class Lighting {
     cam.updateProjectionMatrix();
   }
 
-  requestEnv() { this._envPending = true; }
+  // A constant radiance atlas supplies diffuse fill during streaming. Matching
+  // the final CubeUV dimensions keeps every PBR program linked when PMREM arrives.
+  seedEnvironment() {
+    const r = this.renderer, low = this.quality === 'low';
+    const target = new THREE.WebGLRenderTarget(low ? 336 : 768, low ? 256 : 1024,
+      {type: this.hdr ? THREE.HalfFloatType : THREE.UnsignedByteType, depthBuffer:false, colorSpace:THREE.LinearSRGBColorSpace});
+    target.texture.mapping = THREE.CubeUVReflectionMapping;
+    const previous = r.getRenderTarget(), color = r.getClearColor(new THREE.Color()), alpha = r.getClearAlpha();
+    const radiance = new THREE.Color(1.38, 1.46, 1.55).multiplyScalar(1 - this.night);
+    r.setRenderTarget(target);
+    r.setClearColor(radiance); r.clearColor();
+    r.setClearColor(color, alpha); r.setRenderTarget(previous);
+    this.seedRT = target;
+    this.scene.environment = target.texture;
+    this.revision++;
+    this.scene.fog.color.copy(radiance);
+  }
+
+  requestEnv(force = false) {
+    this._envPending = true;
+    if (force) this._lastEnvDir.copy(this.sunDir).negate();
+  }
 
   /** Call every frame; regenerates the env map when the sun moved > 1° (throttled to 4 Hz). */
   update(now, force = false) {
@@ -204,15 +228,47 @@ export class Lighting {
     // the horizon read-back is a synchronous GPU→CPU stall: while the day is playing only redo it
     // when the sun moved noticeably (fog colour changes slowly)
     const readH = force || !this._lastHorizonDir || this._lastHorizonDir.angleTo(this.sunDir) / DEG > (this.envInterval > 400 ? 4 : 1);
-    this._regenEnv(readH);
+    this._regenEnv(readH ? this._readHorizon() : null);
     this._lastEnvTime = now; this._lastEnvDir.copy(this.sunDir); this._envPending = false;
     return true;
   }
 
-  _regenEnv(readHorizon = true) {
+  async prepare(breathe) {
+    // Read the four horizon probes together. The asynchronous fence leaves input
+    // and camera frames live while the GPU finishes drawing the sky.
+    const sampledSun = this.sunDir.clone();
+    this._drawHorizon();
+    await this.renderer.readRenderTargetPixelsAsync(this.horizonRT, 0, 1, 16, 1, this._px);
+    await breathe();
+    // Scrubbing time while the fence is pending can move the horizon to another hour.
+    const fog = sampledSun.angleTo(this.sunDir) > DEG ? this._readHorizon() : this._horizonColor();
+    this._regenEnv(fog);
+    this._lastEnvTime = performance.now();
+    this._lastEnvDir.copy(this.sunDir); this._envPending = false;
+  }
+
+  async readDiffuseFaces() {
+    const rt = this.envRT;
+    if (!rt || !this.hdr) return null;
+    // r170 packs its roughest PMREM mip as six 16px faces in a 48×32 strip.
+    // Read once per lighting change instead of fetching the atlas at every vertex.
+    const face = 16, width = 3 * face;
+    const data = new Uint16Array(width * 2 * face * 4);
+    await this.renderer.readRenderTargetPixelsAsync(rt, 6 * width, rt.height - 4 * face, width, 2 * face, data);
+    const rgb = new Float32Array(18);
+    for (let side = 0; side < 6; side++) {
+      const x = (side % 3) * face + 7, y = (side < 3 ? 0 : face) + 7;
+      for (let c = 0; c < 3; c++) {
+        for (const offset of [0, 1, width, width + 1]) {
+          rgb[3 * side + c] += .25 * THREE.DataUtils.fromHalfFloat(data[4 * (y * width + x + offset) + c]);
+        }
+      }
+    }
+    return rgb.every(Number.isFinite) ? rgb : null;
+  }
+
+  _regenEnv(fogCol) {
     const r = this.renderer;
-    // 1) horizon colour (linear HDR, pre-tonemap) → fog colour, ground-bounce colour
-    const fogCol = readHorizon ? this._readHorizon() : null;
     if (fogCol) this._lastHorizonDir = (this._lastHorizonDir || new THREE.Vector3()).copy(this.sunDir);
     if (fogCol) {
       // twilight haze is dimmer than the bright sky band right at the horizon (otherwise distant
@@ -225,45 +281,62 @@ export class Lighting {
     }
     if (this._lastFog) this.scene.fog.color.copy(this._lastFog).multiplyScalar(this._fogDim)
       .lerp(new THREE.Color(1.36, 1.04, .76), .25 * this.golden * (1 - this.night));
+    // r170 requires renderable half-float buffers to filter a radiance atlas.
+    if (!this.hdr) { this.seedRT?.dispose(); this.seedEnvironment(); return; }
     // 2) PMREM
-    const prevTM = r.toneMapping;
-    const rt = this.pmrem.fromScene(this.envScene, 0, 0.1, 2000);
-    r.toneMapping = prevTM;
-    if (this.envRT) this.envRT.dispose();
+    this.pmrem ??= new THREE.PMREMGenerator(r);
+    let rt;
+    if (this.quality === 'low') {
+      // fromScene always bakes 256px faces in r170. This sky has no fine texture.
+      this.envCube ??= new THREE.WebGLCubeRenderTarget(64, {type: THREE.HalfFloatType});
+      this.cubeCamera ??= new THREE.CubeCamera(.1, 2000, this.envCube);
+      this.cubeCamera.update(r, this.envScene);
+      const reuse = this.envRT?.height === 256 ? this.envRT : null;
+      rt = this.pmrem.fromCubemap(this.envCube.texture, reuse);
+    } else {
+      this.envCube?.dispose(); this.envCube = this.cubeCamera = null;
+      rt = this.pmrem.fromScene(this.envScene, 0, .1, 2000);
+    }
+    if (this.envRT !== rt) this.envRT?.dispose();
     this.envRT = rt;
     this.scene.environment = rt.texture;
+    this.revision++;
+    this.seedRT?.dispose(); this.seedRT = null;
+  }
+
+  _drawHorizon() {
+    const r = this.renderer, previous = r.getRenderTarget(), cam = this.horizonCam;
+    const offsets = [.5, 1, 1.5, .35];
+    try {
+      for (let i = 0; i < offsets.length; i++) {
+        const a = this.azimuth * DEG + offsets[i] * Math.PI;
+        cam.lookAt(Math.sin(a), Math.sin(2.5 * DEG), -Math.cos(a));
+        cam.updateMatrixWorld();
+        this.horizonRT.viewport.set(i * 4, 0, 4, 4);
+        this.horizonRT.scissor.copy(this.horizonRT.viewport);
+        this.horizonRT.scissorTest = true;
+        r.setRenderTarget(this.horizonRT);
+        r.render(this.envScene, cam);
+      }
+    } finally { r.setRenderTarget(previous); }
+  }
+
+  _horizonColor() {
+    const sum = new THREE.Color(0, 0, 0);
+    let count = 0;
+    for (let i = 4; i < this._px.length; i += 16) {
+      const [r,g,b] = this._px.subarray(i, i+3);
+      if (Number.isFinite(r + g + b)) { sum.r += r; sum.g += g; sum.b += b; count++; }
+    }
+    if (!count) return null;
+    sum.multiplyScalar(1 / (count * (this._px instanceof Uint8Array ? 255 : 1)));
+    sum.r = clamp(sum.r, .002, 20); sum.g = clamp(sum.g, .002, 20); sum.b = clamp(sum.b, .002, 20);
+    return sum;
   }
 
   _readHorizon() {
-    const r = this.renderer;
-    try {
-      const prevRT = r.getRenderTarget();
-      const sum = new THREE.Color(0, 0, 0);
-      const cam = this.horizonCam;
-      const az0 = this.azimuth * DEG;
-      const offsets = [Math.PI * 0.5, Math.PI, Math.PI * 1.5, 0.35 * Math.PI];
-      let n = 0;
-      const prevFog = this.scene.fog;
-      for (const off of offsets) {
-        const a = az0 + off;
-        cam.position.set(0, 0, 0);
-        cam.lookAt(Math.sin(a), Math.sin(2.5 * DEG), -Math.cos(a));
-        cam.updateMatrixWorld();
-        r.setRenderTarget(this.horizonRT);
-        r.render(this.envScene, cam);
-        r.readRenderTargetPixels(this.horizonRT, 1, 1, 1, 1, this._px);
-        const c = new THREE.Color(this._px[0], this._px[1], this._px[2]);
-        if (Number.isFinite(c.r) && Number.isFinite(c.g) && Number.isFinite(c.b)) { sum.add(c); n++; }
-      }
-      this.scene.fog = prevFog;
-      r.setRenderTarget(prevRT);
-      if (!n) return null;
-      sum.multiplyScalar(1 / n);
-      // sky shader output is linear; keep within a sane range
-      sum.r = clamp(sum.r, 0.002, 20); sum.g = clamp(sum.g, 0.002, 20); sum.b = clamp(sum.b, 0.002, 20);
-      return sum;
-    } catch (e) {
-      return null;
-    }
+    this._drawHorizon();
+    this.renderer.readRenderTargetPixels(this.horizonRT, 0, 1, 16, 1, this._px);
+    return this._horizonColor();
   }
 }

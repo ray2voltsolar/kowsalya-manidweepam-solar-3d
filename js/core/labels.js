@@ -4,8 +4,23 @@
 import * as THREE from 'three';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 
+const mobileLabels = new WeakMap();
+
 export function createLabelRenderer(container) {
   const lr = new CSS2DRenderer();
+  if (matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 600) {
+    const render = lr.render;
+    const previous = new THREE.Matrix4(), current = new THREE.Matrix4();
+    lr.render = (scene, camera) => {
+      render(scene, camera);
+      current.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      if (!current.equals(previous)) {
+        previous.copy(current);
+        // A preset can jump between frames. Position its titles before this frame is painted.
+        for (const child of scene.children) mobileLabels.get(child)?.();
+      }
+    };
+  }
   lr.domElement.id = 'labels';
   container.appendChild(lr.domElement);
   return lr;
@@ -15,6 +30,8 @@ export function createLabelRenderer(container) {
 export function createSiteLabels(site, onClick) {
   const group = new THREE.Group(); group.name = 'labels';
   const items = [];
+  const phone = matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 600;
+  const cameraSpace = new THREE.Vector3();
   for (const L of site.LABELS) {
     const el = document.createElement('button');
     el.type = 'button';
@@ -33,12 +50,17 @@ export function createSiteLabels(site, onClick) {
     obj.center.set(0.5, 1.0);
     obj.userData.kind = L.kind;
     obj.userData.priority = L.block ? 1 : 0;
+    if (phone && !L.block) obj.onBeforeRender = (_renderer, _scene, camera) => {
+      cameraSpace.setFromMatrixPosition(obj.matrixWorld).applyMatrix4(camera.matrixWorldInverse);
+      const depth = camera.isPerspectiveCamera ? -cameraSpace.z : 1;
+      obj.userData.metresPerPixel = 2 * depth / (innerWidth * camera.projectionMatrix.elements[0]);
+    };
     group.add(obj);
     items.push(obj);
   }
   // declutter priority: roof labels (with kWp) first, then the order of site.LABELS
   const ranked = items.slice().sort((a,b) => b.userData.priority - a.userData.priority);
-  return {
+  const labels = {
     group, items,
     setSolarVisible(on) {
       for (const item of items) {
@@ -57,26 +79,46 @@ export function createSiteLabels(site, onClick) {
       // labels under it are hidden instead of peeking out half-clipped
       const kept = [];
       const obstacles = [];
-      for (const sel of ['#panel', '#viewbar', '#brand', '#compass', '#legendFloat', '#infocard']) {
+      for (const sel of ['#panel', '#panelOpen', '#viewbar', '#brand', '#brandOpen', '#bottomOpen', '#compass', '#legendFloat', '#infocard', '#scalebar.show', '#gestureHint', '#attrib', '#measureHint', '#toasts']) {
         const e = document.querySelector(sel);
         if (!e) continue;
         const cs = getComputedStyle(e); if (cs.display === 'none' || cs.visibility === 'hidden') continue;
         const r = e.getBoundingClientRect();
         if (r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight) obstacles.push(r);
       }
-      for (const o of ranked) {
+      const rectangles = ranked.map(o => o.element.getBoundingClientRect());
+      const active = document.querySelector('#viewbar .on[data-view]')?.dataset.view;
+      for (const [index,o] of ranked.entries()) {
         const el = o.element;
         if (el.style.display === 'none') { el.classList.remove('lbl-hidden'); continue; }
-        const r = el.getBoundingClientRect();
-        if (!r.width) continue;
-        const hit = kept.some((k) => r.left < k.right + 4 && r.right > k.left - 4 && r.top < k.bottom + 2 && r.bottom > k.top - 2)
-          || obstacles.some((k) => r.left < k.right && r.right > k.left && r.top < k.bottom && r.bottom > k.top)
-          || r.right > innerWidth - 2 || r.left < 2;
+        const box = rectangles[index];
+        if (!box.width) continue;
+        const ownView = o.userData.kind === 'equipment' ? active === 'inverter' : active === 'road';
+        const distant = phone && !o.userData.priority && !ownView && !(o.userData.metresPerPixel < .21);
+        const originalLeft = box.left - (o.userData.nudge || 0);
+        const room = Math.floor(box.width / 2) - 6;
+        const offsets = phone && o.userData.priority ? [0, -16, 16, -room, room] : [0];
+        let hit = true;
+        if (!distant) for (const dx of offsets) {
+          const r = {left:originalLeft+dx, right:originalLeft+dx+box.width, top:box.top, bottom:box.bottom};
+          if (r.left < 2 || r.right > innerWidth-2 || r.top < 0 || r.bottom > innerHeight) continue;
+          if (kept.some(k => r.left < k.right+4 && r.right > k.left-4 && r.top < k.bottom+2 && r.bottom > k.top-2)) continue;
+          if (obstacles.some(k => r.left < k.right && r.right > k.left && r.top < k.bottom && r.bottom > k.top)) continue;
+          if (dx !== (o.userData.nudge || 0)) {
+            o.userData.nudge = dx;
+            el.style.setProperty('--label-shift', dx+'px');
+          }
+          kept.push(r);
+          hit = false;
+          break;
+        }
         el.classList.toggle('lbl-hidden', hit);
-        if (!hit) kept.push(r);
+        el.inert = hit;
       }
     },
   };
+  if (phone) mobileLabels.set(group, labels.declutter);
+  return labels;
 }
 
 /** Compass: rotates so the N needle points to geographic north on screen. */

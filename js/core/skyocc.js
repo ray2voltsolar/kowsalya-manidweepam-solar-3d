@@ -12,6 +12,7 @@ import { SITE } from '../site-data.js';
 const {minX:x0, maxX:x1, minY:y0, maxY:y1} = SITE.detailBounds;
 const REGION = {x0,x1,y0,y1};
 const TOP = 60, NEAR = 0.5, FAR = 72;                 // camera height / depth range (world Y −12 … 59.5)
+const mapSize = quality => quality === 'ultra' ? 2048 : quality === 'low' ? 512 : 1024;
 const SKIP_NAME = /sunpath|label|measure|ghost|helper|sky|cloud/i;
 
 function makeTaps(quality) {
@@ -31,7 +32,7 @@ function makeTaps(quality) {
 export class SkyOcclusion {
   constructor(renderer, scene, quality = 'high') {
     this.renderer = renderer; this.scene = scene;
-    const size = quality === 'ultra' ? 2048 : quality === 'low' ? 512 : 1024;
+    const size = mapSize(quality);
     const dt = new THREE.DepthTexture(size, size);
     dt.type = THREE.UnsignedIntType;
     dt.minFilter = dt.magFilter = THREE.NearestFilter;
@@ -106,7 +107,7 @@ export class SkyOcclusion {
     if (!(m.isMeshStandardMaterial || m.isMeshLambertMaterial || m.isMeshPhongMaterial)) return false;
     if (m.userData && m.userData.noSkyOcc) return false;
     this.patched.add(m);
-    const U = this.uniforms, nTaps = this.taps.length;
+    const U = this.uniforms;
     const prevCompile = m.onBeforeCompile;
     const prevKey = m.customProgramCacheKey;
     // Three's default cache key reads onBeforeCompile.toString(). Preserve the
@@ -115,6 +116,7 @@ export class SkyOcclusion {
     m.onBeforeCompile = function (sh, r) {
       if (prevCompile) prevCompile.call(this, sh, r);
       if (!sh.fragmentShader.includes('#include <aomap_fragment>') || !sh.vertexShader.includes('#include <project_vertex>')) return;
+      const nTaps = U.uSkyTaps.value.length;
       Object.assign(sh.uniforms, U);
       sh.vertexShader = 'varying vec3 vSkyW;\n' + sh.vertexShader.replace('#include <project_vertex>', `#include <project_vertex>
         {
@@ -168,10 +170,23 @@ export class SkyOcclusion {
     };
     m.customProgramCacheKey = function () {
       const key = prevKey === THREE.Material.prototype.customProgramCacheKey ? sourceKey : prevKey.call(this);
-      return key + '|skyocc' + nTaps;
+      return key + '|skyocc' + U.uSkyTaps.value.length;
     };
     m.needsUpdate = true;
     return true;
+  }
+
+  setQuality(quality) {
+    const size = mapSize(quality);
+    if (this.rt.width === size) return;
+    this.rt.setSize(size, size);
+    this.taps = makeTaps(quality);
+    this.uniforms.uSkyTaps.value = this.taps.map(t => new THREE.Vector3(...t));
+    this.scene.traverse(o => {
+      for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
+        if (this.patched.has(m)) m.needsUpdate = true;
+      }
+    });
   }
 
   setEnabled(on) { this.uniforms.uSkyOn.value = on && this.ready ? 1 : 0; }

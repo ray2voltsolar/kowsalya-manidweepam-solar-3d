@@ -1,3 +1,4 @@
+import {grain as addGrain,surfaceSizes} from '../buildings/surfaces.js';
 import * as THREE from 'three';
 import { rng } from './kit.js';
 
@@ -8,27 +9,25 @@ function surface(w,h=w) {
 function texture(c,aniso,colour=true) {
   const t=new THREE.CanvasTexture(c.canvas);
   t.colorSpace=colour?THREE.SRGBColorSpace:THREE.NoColorSpace;
-  t.wrapS=t.wrapT=THREE.RepeatWrapping; t.anisotropy=aniso;
+  t.wrapS=t.wrapT=THREE.RepeatWrapping; t.anisotropy=aniso;t.minFilter=THREE.LinearMipmapLinearFilter;
   return t;
 }
 function grain(c,strength,seed) {
-  const image=c.getImageData(0,0,c.canvas.width,c.canvas.height), a=image.data, rand=rng(seed);
-  for(let i=0;i<a.length;i+=4) {
-    const v=(rand()-.5)*strength;
-    for(let j=0;j<3;j++) a[i+j]+=v;
-  }
-  c.putImageData(image,0,0);
+  const random=rng(seed);
+  addGrain(c,strength/2,()=>2*random());
 }
 const fill=(c,col,x,y,w,h)=>{c.fillStyle=col;c.fillRect(x,y,w,h);};
 
 // A four-storey atlas keeps reveals, aluminium frames and curtains legible at long distances.
 // The same paint operations write the relief and roughness masks for the window recesses.
 export function facades(q,aniso) {
-  const w=q==='low'?512:1024,h=w/2;
-  const c=surface(w,h), b=surface(w,h), r=surface(w,h), random=rng(82149);
-  for(const ctx of [c,b,r]) ctx.scale(w/800,h/400);
+  const w=surfaceSizes[q].neighbourFacade,h=w/2;
+  const c=surface(w,h), masks=surface(w,h), random=rng(82149);
+  for(const ctx of [c,masks]) ctx.scale(w/800,h/400);
   const layer=(x,y,ww,hh,col,level,rough)=>{
-    fill(c,col,x,y,ww,hh);fill(b,level,x,y,ww,hh);fill(r,rough,x,y,ww,hh);
+    fill(c,col,x,y,ww,hh);
+    // StandardMaterial reads bump from red and roughness from green.
+    fill(masks,'#'+level.slice(1,3)+rough.slice(1,3)+'00',x,y,ww,hh);
   };
   layer(0,0,800,400,'#e4dfd4','#acacac','#ededed');
   for(let f=0;f<4;f++)for(let bay=0;bay<8;bay++){
@@ -44,7 +43,7 @@ export function facades(q,aniso) {
       const px=sx+2+j*(pane+3), py=sy+3;
       const ref=c.createLinearGradient(px,py,px+pane*.35,py+sh);
       const light=random();ref.addColorStop(0,light>.68?'#858e8b':'#526165');ref.addColorStop(.55,light>.68?'#69746c':'#39494b');ref.addColorStop(1,'#303936');
-      fill(c,ref,px,py,pane,sh-5);fill(r,'#545454',px,py,pane,sh-5);
+      fill(c,ref,px,py,pane,sh-5);fill(masks,'#485400',px,py,pane,sh-5);
       if(random()>.43){
         const cw=pane*(.28+.57*random());
         fill(c,['#b9ae98','#a29684','#c4bdb1','#949b92'][Math.floor(random()*4)],px,py,cw,sh-6);
@@ -58,11 +57,12 @@ export function facades(q,aniso) {
     layer(x,y+96,100,4,'#bbb5a9','#b6b6b6','#d9d9d9');
   }
   grain(c,8,21);
-  return {map:texture(c,aniso),bumpMap:texture(b,aniso,false),roughnessMap:texture(r,aniso,false)};
+  const relief=texture(masks,aniso,false);
+  return {map:texture(c,aniso),bumpMap:relief,roughnessMap:relief};
 }
 
 export function finish(q,aniso,type) {
-  const n=q==='low'?128:256,c=surface(n),rand=rng(5300);
+  const n=surfaceSizes[q].masonry,c=surface(n),rand=rng(5300);
   c.scale(n/256,n/256);fill(c,'#e7e4de',0,0,256,256);
   if(type==='render'){
     for(let i=0;i<2200;i++){const a=rand()*.09;fill(c,'rgba(72,68,59,'+a+')',rand()*256,rand()*256,1+rand()*3,1+rand()*8);}
@@ -103,17 +103,19 @@ export function finish(q,aniso,type) {
 }
 
 // Low-frequency swell and fine interfering ripples are periodic across the tile seams.
-export function poolTextures(q,aniso) {
-  const n=q==='low'?128:512, normal=surface(n), colour=surface(n);
-  const nm=normal.createImageData(n,n), cm=colour.createImageData(n,n);
+export function* poolTextures(q,aniso) {
+  const n=surfaceSizes[q].water, normal=new Uint8ClampedArray(n*n*4), colour=new Uint8ClampedArray(n*n*4);
   const tau=Math.PI*2;
   const cells=22,rand=rng(51120);
   const sites=Array.from({length:cells*cells},()=>[.10+rand()*.8,.10+rand()*.8]);
-  for(let j=0;j<n;j++)for(let i=0;i<n;i++){
+  for(let j=0;j<n;j++){
+    if(j%4===0)yield;
+    for(let i=0;i<n;i++){
     const x=i/n*tau,y=j/n*tau,s=Math.sin,c=Math.cos;
     const a=7*x+3*y+.9*s(3*y+x), b=5*y-4*x+1.2*s(2*x+y), d=13*y+4*x+1.3*s(3*x-y);
     const nx=.115*c(a)-.055*c(b)+.034*c(d),ny=.05*c(a)+.097*c(b)+.068*c(d);
-    const p=4*(j*n+i);nm.data.set([128+nx*127,128+ny*127,255,255],p);
+    const p=4*((n-1-j)*n+i);
+    normal[p]=128+nx*127;normal[p+1]=128+ny*127;normal[p+2]=normal[p+3]=255;
     // Refraction concentrates sunlight along warped cell edges where two wave fronts meet.
     const wx=i/n*cells+.24*s(a)+.15*s(d),wy=j/n*cells+.27*s(b)+.13*s(d);
     const ix=Math.floor(wx),iy=Math.floor(wy);let first=9,second=9;
@@ -124,13 +126,20 @@ export function poolTextures(q,aniso) {
     }
     const focus=Math.exp(-24*(Math.sqrt(second)-Math.sqrt(first)))*(.45+.55*(.5+.5*s(b)));
     const sun=.4*s(a)+.6*s(b);
-    cm.data.set([39+focus*81+sun*5,134+focus*57+sun*7,141+focus*54+sun*7,255],p);
+    colour[p]=39+focus*81+sun*5;colour[p+1]=134+focus*57+sun*7;colour[p+2]=141+focus*54+sun*7;colour[p+3]=255;
+    }
   }
-  normal.putImageData(nm,0,0);colour.putImageData(cm,0,0);
-  return {normal:texture(normal,aniso,false), caustic:texture(colour,aniso)};
+  function map(bytes,colorSpace){
+    const tex=new THREE.DataTexture(new Uint8Array(bytes.buffer),n,n);
+    tex.colorSpace=colorSpace;tex.wrapS=tex.wrapT=THREE.RepeatWrapping;
+    tex.anisotropy=aniso;tex.generateMipmaps=true;tex.magFilter=THREE.LinearFilter;
+    tex.minFilter=THREE.LinearMipmapLinearFilter;tex.needsUpdate=true;
+    return tex;
+  }
+  return {normal:map(normal,THREE.NoColorSpace),caustic:map(colour,THREE.SRGBColorSpace)};
 }
-export function chainMesh(aniso){
-  const c=surface(128);
+export function chainMesh(q,aniso){
+  const c=surface(surfaceSizes[q].chainLink);
   for(const slope of [-1,1])for(let t=-128;t<=256;t+=64){
     c.lineWidth=3;c.strokeStyle='#95958b';c.beginPath();c.moveTo(t,0);c.lineTo(t+slope*128,128);c.stroke();
   }

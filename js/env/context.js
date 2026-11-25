@@ -1,26 +1,32 @@
+import { cachedGeometry } from './procedural-cache.js';
 import { GeoBuilder, rng } from './util.js';
 import { bays, westVerge } from './layout.js';
 
-export function buildRoad(ctx,detail) {
+export function buildRoad(ctx,detail,pack=null) {
   const {THREE,site}=ctx,{ROAD,COMPOUND}=site;
   const curve=new THREE.CatmullRomCurve3(ROAD.centerline.map(([x,y])=>new THREE.Vector3(x,0,-y)));
   const length=curve.getLength(), steps=Math.ceil(length/(ctx.quality==='low'?2.2:1.1)), half=ROAD.width/2;
-  const gb=new GeoBuilder(),prev=[];
-  // assumed: dropped kerb at the gate and a narrow strip of concrete flags on the east shoulder.
-  const profile=[[-half,0],[half,0],[half+.03,.105],[half+.09,.14],[half+.32,.14],[half+.34,.131],[half+1.46,.131],[half+1.50,.016]];
-  for(let i=0;i<=steps;i++) {
-    const f=i/steps,p=curve.getPointAt(f),forward=curve.getTangentAt(f),row=[];
-    const ramp=THREE.MathUtils.smoothstep(Math.abs(-p.z-COMPOUND.gate.y),COMPOUND.gate.width*.5,COMPOUND.gate.width*.5+1.65);
-    for(let j=0;j<profile.length;j++){
-      const [across,z]=profile[j];
-      const normal=j===2?[-forward.z,.3,forward.x]:[0,1,0];
-      row.push(gb.vert([p.x+forward.z*across,.022+z*ramp,p.z-forward.x*across],normal,[across,f*length]));
-      if(i&&j) gb.quad(prev[j-1],prev[j],row[j],row[j-1]);
+  const name=ROAD.name+' with dropped kerb';
+  const geometry=pack?cachedGeometry(THREE,pack,name):roadProfile();
+  function roadProfile() {
+    const gb=new GeoBuilder(),prev=[];
+    // assumed: dropped kerb at the gate and a narrow strip of concrete flags on the east shoulder.
+    const profile=[[-half,0],[half,0],[half+.03,.105],[half+.09,.14],[half+.32,.14],[half+.34,.131],[half+1.46,.131],[half+1.50,.016]];
+    for(let i=0;i<=steps;i++) {
+      const f=i/steps,p=curve.getPointAt(f),forward=curve.getTangentAt(f),row=[];
+      const ramp=THREE.MathUtils.smoothstep(Math.abs(-p.z-COMPOUND.gate.y),COMPOUND.gate.width*.5,COMPOUND.gate.width*.5+1.65);
+      for(let j=0;j<profile.length;j++){
+        const [across,z]=profile[j];
+        const normal=j===2?[-forward.z,.3,forward.x]:[0,1,0];
+        row.push(gb.vert([p.x+forward.z*across,.022+z*ramp,p.z-forward.x*across],normal,[across,f*length]));
+        if(i&&j) gb.quad(prev[j-1],prev[j],row[j],row[j-1]);
+      }
+      prev.splice(0,prev.length,...row);
     }
-    prev.splice(0,prev.length,...row);
+    // Road profile is traversed eastward and then southward, so reverse the winding for its upper surface.
+    for(let i=0;i<gb.i.length;i+=3) [gb.i[i+1],gb.i[i+2]]=[gb.i[i+2],gb.i[i+1]];
+    return gb.build(THREE);
   }
-  // Road profile is traversed eastward and then southward, so reverse the winding for its upper surface.
-  for(let i=0;i<gb.i.length;i+=3) [gb.i[i+1],gb.i[i+2]]=[gb.i[i+2],gb.i[i+1]];
   const mat=new THREE.MeshStandardMaterial({roughness:.96,transparent:true,polygonOffset:true,polygonOffsetFactor:-1,polygonOffsetUnits:-1});
   mat.onBeforeCompile=sh=>{
     Object.assign(sh.uniforms,{grain:detail,roadLength:{value:length},halfWidth:{value:half},gateY:{value:COMPOUND.gate.y}});
@@ -51,7 +57,7 @@ export function buildRoad(ctx,detail) {
       diffuseColor.a*=smoothstep(.15,18.,min(y,roadLength-y));
     `);
   };
-  const road=new THREE.Mesh(gb.build(THREE),mat);road.name=ROAD.name+' with dropped kerb';road.receiveShadow=true;road.renderOrder=-1;
+  const road=new THREE.Mesh(geometry,mat);road.name=name;road.receiveShadow=true;road.renderOrder=-1;
   return road;
 }
 

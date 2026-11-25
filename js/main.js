@@ -21,7 +21,8 @@ import { formatIN, fmtClock, fmtMinutes, fmtDateLong, escapeHtml } from './core/
 
 // ---------------------------------------------------------------- errors
 window.__errors = window.__errors || [];
-window.__ready = false;
+window.__ready = window.__firstPaint = false;
+window.__bootMs = { firstPaint: null, ready: null };
 addEventListener('error', (e) => window.__errors.push(String(e.message || e)));
 addEventListener('unhandledrejection', (e) => window.__errors.push(String(e.reason && (e.reason.stack || e.reason))));
 
@@ -66,12 +67,12 @@ async function boot() {
   // Shadows are static unless the sun or the scene changes → re-render the shadow map only then
   // (the GTAO pass would otherwise re-render it a second time every frame).
   renderer.shadowMap.autoUpdate = false;
-  const shadowsDirty = () => { renderer.shadowMap.needsUpdate = true; };
+  let sceneRevision = 0;
+  const shadowsDirty = () => { renderer.shadowMap.needsUpdate = true; sceneRevision++; };
   shadowsDirty();
   let quality = params.get('quality');
   if (!QUALITY[quality]) { try { quality = localStorage.getItem('r2v.quality'); } catch (e) { quality = null; } }
-  let autoQ = false; // quality picked automatically → may step down once if the device is too slow
-  if (!QUALITY[quality] || (quality === 'ultra' && params.get('quality') !== 'ultra')) { quality = autoQuality(renderer); autoQ = true; }
+  if (!QUALITY[quality] || (quality === 'ultra' && params.get('quality') !== 'ultra')) quality = autoQuality(renderer);
   mark('renderer');
   const scene = new THREE.Scene();
   const rig = new CameraRig(renderer.domElement);
@@ -84,20 +85,22 @@ async function boot() {
 
   let offsetCur = ui.panelOffsetPx(), offsetTarget = offsetCur;
   let offsetYCur = ui.panelOffsetY(), offsetYTarget = offsetYCur;
-  // Adaptive resolution: while the view is moving on a slow (fill-rate-bound) GPU the frame is drawn
-  // with fewer pixels (resScale < 1); as soon as it stops, the full-resolution still frame is drawn.
-  let resScale = 1, motionScale = 1;
-  let ambientSlow = false, lastWasAmbient = false; // ambient animation is skipped where full-res frames are expensive
+  let resScale = 1, motionTier = 0, learnedTier = 0, frameDirty = true;
+  let motionTimer = 0, motionRevision = 0, motionPrepared = false;
+  const farDetails = [];
   const basePixelRatio = () => Math.min(devicePixelRatio || 1, QUALITY[quality].pixelRatio);
-  const minMotionScale = () => Math.min(1, Math.max(0.7, 1 / basePixelRatio()));
-  function setResScale(sc) {
-    if (Math.abs(sc - resScale) < 0.02) return;
-    resScale = sc; post.setSize(innerWidth, innerHeight, basePixelRatio() * sc);
-    demandRender(300); // resizing clears the canvas → draw this tick
+  function collectFarDetails() {
+    farDetails.length = 0;
+    scene.traverse(o => {
+      // Small fittings and understory batches remain in picking and shading analysis.
+      if (o.isMesh && /^(pv-(junction-boxes|mid-clamps|end-clamps|base-anchors)|Garden shrubs and seasonal scrub|Dry thorn scrub|Seasonal grass tussocks|Station instruments|Earthing, saddle blocks)/.test(o.name)) farDetails.push(o);
+    });
   }
   function resize() {
     const w = innerWidth, h = innerHeight;
-    post.setSize(w, h, basePixelRatio() * resScale);
+    post.setSize(w, h, basePixelRatio());
+    if (window.__ready) scheduleMotionPreparation();
+    learnedTier = 0;
     offsetTarget = ui.panelOffsetPx(); offsetYTarget = ui.panelOffsetY();
     rig.setSize(w, h, offsetCur, offsetYCur);
     labelRenderer.setSize(w, h);
@@ -110,15 +113,173 @@ async function boot() {
   const occluders = [];
   const animated = [];
   const sunSubs = [];
+  let lost = false, frozen = false, resumeLoop, recover, restored, recovering = false;
+  let lastDrag = -Infinity;
+  let skyOcc = null, envReady = false, declutterReady = false;
+  let diffuseRevision = -1, samplingRevision = -1;
+  let lastShadowDraw = -Infinity;
+  const canvas = renderer.domElement;
+  canvas.addEventListener('webglcontextlost', e => {
+    e.preventDefault();
+    lost = true;
+    motionPrepared = false;
+    ++motionRevision;
+    post.fences.length = 0;
+    renderer.setAnimationLoop(null);
+    restored = new Promise(resolve => { recover = resolve; });
+    ui.showContextLost(() => location.reload());
+  });
+  canvas.addEventListener('webglcontextrestored', () => {
+    lost = false;
+    recover?.(); recovering = true;
+    if (envReady) lighting.update(performance.now(), true);
+    else if (lighting.seedRT) { lighting.seedRT.dispose(); lighting.seedEnvironment(); }
+    if (skyOcc?.ready) skyOcc.update();
+    if (window.__ready) scheduleMotionPreparation();
+    shadowsDirty(); demandRender();
+    if (resumeLoop && !frozen) renderer.setAnimationLoop(resumeLoop);
+  });
+
+  async function compile(root) {
+    if (lost) await restored;
+    const before = renderer.getRenderTarget();
+    let done;
+    try {
+      renderer.setRenderTarget(post.sceneTarget);
+      if (!isPhoneScreen()) post.rememberMaterials(root);
+      skyOcc?.patchScene(root);
+      done = renderer.compileAsync(root, rig.camera, scene);
+    } finally { renderer.setRenderTarget(before); }
+    await done;
+  }
+
+  async function compileChunks(root) {
+    const meshes = [];
+    root.traverse(o => { if (o.material) meshes.push(o); });
+    const batch = new THREE.Group();
+    for (let i = 0; i < meshes.length; i += 8) {
+      batch.children = meshes.slice(i, i + 8);
+      await yieldToInput();
+      await compile(batch);
+    }
+  }
+
+  // Builders publish chunks to their live groups. Withhold just the new meshes
+  // from the view and shadow cameras until their programs are linked.
+  const staged = new Map();
+  function watch(parent) {
+    parent.traverse(o => o.addEventListener('childadded', onChild));
+  }
+  function onChild({child}) {
+    watch(child);
+    child.traverse(o => {
+      if (!o.material || staged.has(o)) return;
+      staged.set(o, o.layers.mask);
+      o.layers.mask = 0;
+    });
+  }
+  async function publish() {
+    if (!staged.size) return;
+    const chunk = new THREE.Group();
+    const masks = Array.from(staged);
+    staged.clear();
+    // compileAsync only traverses these references. Their actual parents stay intact.
+    chunk.children = masks.map(([o]) => o);
+    try {
+      await compileChunks(chunk);
+      // Upload material maps before their first visible draw. A large atlas and
+      // several GL uploads otherwise land on the same frame as the new geometry.
+      const maps = new Set();
+      for (const [o] of masks) {
+        for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
+          for (const value of Object.values(m)) {
+            if (value?.isTexture && !value.isRenderTargetTexture && value.image) maps.add(value);
+          }
+        }
+      }
+      let start = performance.now();
+      for (const map of maps) {
+        if (lost) await restored;
+        renderer.initTexture(map);
+        if (performance.now() - start > 8) { await yieldToInput(); start = performance.now(); }
+      }
+      if (performance.now() - lastDrag < 100) await yieldToInput();
+    }
+    finally {
+      for (const [o, mask] of masks) o.layers.mask = mask;
+      shadowsDirty(); frameDirty = true;
+    }
+  }
+  async function yieldToInput() {
+    // Give queued input priority without spending a vsync on every builder slice.
+    if (globalThis.scheduler?.yield) await scheduler.yield();
+    else await new Promise(resolve => setTimeout(resolve, 0));
+    while (performance.now() - lastDrag < 100) await nextFrame();
+    if (lost) await restored;
+  }
+
+  function cacheGround() {
+    post.bakeDistantGround(R.environment?.ground, SITE.center, sceneRevision);
+    post.groundLightRevision = lighting.revision;
+  }
+
+  async function sampleDistantLighting() {
+    const revision = lighting.revision;
+    if (quality !== 'medium' || !post.motionTarget || diffuseRevision === revision || samplingRevision === revision) return;
+    samplingRevision = revision;
+    try {
+      const faces = await lighting.readDiffuseFaces();
+      if (faces && !lost && revision === lighting.revision) {
+        post.farSky.value.set(faces);
+        diffuseRevision = revision;
+      }
+    } catch (err) { console.warn('[app] distant lighting unavailable', err); }
+  }
+
+  // A resize, quality change or context restoration can replace GPU storage.
+  // Keep those targets out of the orbit ladder until the idle warm-up finishes.
+  function scheduleMotionPreparation() {
+    const revision = ++motionRevision;
+    motionPrepared = false;
+    clearTimeout(motionTimer);
+    motionTimer = setTimeout(async () => {
+      try {
+        await yieldToInput();
+        if (revision !== motionRevision || frozen) return;
+        post.prepareMotion(ctx.isPhone);
+        if (!post.motionTarget) return;
+        if (!post.farMeshes.length) await post.prepareFarMaterials(rig.camera, yieldToInput);
+        if (revision !== motionRevision) return;
+        collectFarDetails();
+        cacheGround();
+        await sampleDistantLighting();
+        const readTier = await post.warmMotion(rig.camera, R.environment?.ground, farDetails, yieldToInput);
+        if (revision === motionRevision && !lost) {
+          learnedTier = readTier?.() || 0;
+          motionPrepared = true;
+          frameDirty = true;
+        } else readTier?.();
+      } catch (e) { console.warn('[app] motion quality preparation unavailable', e); }
+    }, 300);
+  }
+  async function breathe() {
+    await yieldToInput();
+    await publish();
+  }
   const ctx = {
     THREE, scene, renderer, site,
     get camera() { return rig.camera; },
-    quality: quality === 'ultra' ? 'high' : quality,
+    quality: quality === 'ultra' ? 'high' : quality,      // geometry / detail-count tier
+    // texture sizes never drop below 'medium': a phone renders at 2× pixel density and shows every texel
+    textureQuality: quality === 'ultra' || quality === 'high' ? 'high' : 'medium',
+    isPhone: isPhoneScreen(),
+    breathe,
+    invalidate: () => { shadowsDirty(); frameDirty = true; },
     maxAnisotropy: renderer.capabilities.getMaxAnisotropy(),
     registerOccluder: (m) => { if (m && !occluders.includes(m)) occluders.push(m); },
     registerAnimated: (fn) => { if (typeof fn === 'function') animated.push(fn); },
     sunState: { azimuth: 0, elevation: 0, dirWorld: new THREE.Vector3(0, 1, 0), date: new Date() },
-    onSunChange: (fn) => { if (typeof fn === 'function') sunSubs.push(fn); },
+    onSunChange: (fn) => { if (typeof fn === 'function') { sunSubs.push(fn); fn(ctx.sunState); } },
   };
 
   // ------------------------------------------------------------ time state
@@ -158,9 +319,20 @@ async function boot() {
   mark('lighting');
 
   // ------------------------------------------------------------ load builders
-  for (const [bi, b] of BUILDERS.entries()) {
-    ui.setLoading(b.pct - 14, `Step ${bi + 1} of ${BUILDERS.length + 1} · Building ${b.label}…`);
-    await nextFrame(); // let the bar & label paint before the builder blocks the thread
+  const startView = VIEWS[params.get('view')] ? params.get('view') : 'overview';
+  rig.flyTo(startView, { instant: true });
+  post.setCamera(rig.camera);
+  // Set up the final shader signatures now. Only the uniforms are live at boot;
+  // the filtered sky and occlusion depth are generated after the first paint.
+  mark('lighting-seed:start');
+  lighting.seedEnvironment();
+  skyOcc = app.skyOcc = new SkyOcclusion(renderer, scene, quality);
+  mark('lighting-seed:end');
+  mark('compile');
+  const earlyPrograms = [compile(lighting.sky)];
+  const R = app.results;
+  const early = BUILDERS.filter(b => ['environment','buildings','solar'].includes(b.key));
+  async function build(b) {
     try {
       const t0 = performance.now();
       const mod = await modP[b.key];
@@ -169,7 +341,11 @@ async function boot() {
       const nSubs = sunSubs.length;
       const res = await mod[b.fn](ctx);
       if (b.key === 'sunpath' && sunSubs.length > nSubs) sunpathSubscribed = true;
-      if (res && res.group) scene.add(res.group);
+      if (res?.group) {
+        if (window.__firstPaint) await compileChunks(res.group);
+        else earlyPrograms.push(compile(res.group).catch(e => reportOnce(b.key + '.compile', e)));
+        scene.add(res.group);
+      }
       app.results[b.key] = res || {};
       mark('built:' + b.key);
       console.log(`[app] ${b.key} built in ${(performance.now() - t0).toFixed(0)} ms`);
@@ -180,37 +356,31 @@ async function boot() {
       window.__errors.push(`${b.key}: ${e && (e.stack || e)}`);
       ui.toast(`${b.label}: module ${missing ? 'not available yet' : 'failed to load'} — continuing without it.`, 'warn', 6000);
     }
+  }
+  for (const [i,b] of early.entries()) {
+    ui.setLoading(b.pct - 14, `Step ${i + 1} of ${early.length + 1} · Building ${b.label}…`);
+    if (!i) await nextFrame();
+    await build(b);
     ui.setLoading(b.pct, `${b.label} ✓`);
   }
-  const R = app.results;
-  if (!R.environment) scene.add(makeFallbackGround());
-  // satellite imagery downloads while the other builders run; give it a little longer so the first
-  // frames already show it (otherwise it pops in when ready)
-  if (R.environment && R.environment.satellite && R.environment.satellite.then) {
-    ui.setLoading(90, 'Loading satellite imagery…');
-    await Promise.race([R.environment.satellite.catch(() => {}), new Promise((r) => setTimeout(r, 4000))]);
-    mark('satellite');
+  if (!R.environment) {
+    const ground = makeFallbackGround();
+    scene.add(ground); earlyPrograms.push(compile(ground));
   }
-
-  prepareColorMipmaps(scene);
-  // Covered-area sky occlusion for balconies, courtyards and under-panel shadows.
-  let skyOcc = null;
-  try { skyOcc = new SkyOcclusion(renderer, scene, quality); skyOcc.patchScene(); skyOcc.update(); } catch (e) { reportOnce('skyocc', e); skyOcc = null; }
-  mark('skyocc');
-  const refreshSkyOcc = () => { shadowsDirty(); if (!skyOcc) return; try { skyOcc.patchScene(); skyOcc.update(); demandRender(1200); } catch (e) { reportOnce('skyocc.update', e); } };
-  app.skyOcc = skyOcc;
-  // Update the indirect lighting when the satellite materials finish loading.
-  if (R.environment && R.environment.satellite && R.environment.satellite.then) {
-    R.environment.satellite.then((s) => { refreshSkyOcc(); satOk = !!(s && s.ok); updateAttribution(); demandRender(1500); }).catch(() => { satOk = false; updateAttribution(); });
-  }
-
-  // The analysis bundle is optional and loaded locally.
-  let shadingMod = null;
-  const shadingP = import('./analysis/shading.js')
-    .then((m) => { shadingMod = typeof m.createShadingAnalyzer === 'function' ? m : null; })
-    .catch((e) => { shadingMod = null; console.warn('[app] shading.js unavailable', e); })
-    .then(() => ui.shade.setAvailable(!!shadingMod));
-
+  const refreshSkyOcc = () => {
+    shadowsDirty();
+    if (!skyOcc?.ready || lost) return;
+    try { skyOcc.patchScene(); skyOcc.update(); demandRender(); }
+    catch (e) { reportOnce('skyocc.update', e); }
+  };
+  const satellite = R.environment?.satellite?.then(s => {
+    satOk = !!s?.ok; mark('satellite');
+  }, () => { satOk = false; }).finally(() => {
+    updateAttribution(); ctx.invalidate();
+  });
+  let shadingMod = null, enableAnalysis;
+  const shadingP = new Promise(resolve => { enableAnalysis = resolve; });
+  ui.shade.setAvailable(false);
 
   // ------------------------------------------------------------ labels, compass, scale bar
   const labels = createSiteLabels(site, label => {
@@ -298,7 +468,7 @@ async function boot() {
   if (clean || params.has('labels')) ui.setLayer('labels', params.get('labels') === '1');
   for (const k of Object.keys(layerAvail)) {
     const on = ui.layerState(k);
-    if (!layerAvail[k]) { if (k === 'strings' || k === 'sunpath') ui.setLayer(k, false); continue; }
+    if (!layerAvail[k]) continue;
     if (on && ['shadows', 'modules', 'context', 'satellite', 'vegetation', 'vehicles'].includes(k)) continue; // already the builders' default
     applyLayer(k, on);
   }
@@ -468,7 +638,6 @@ async function boot() {
   const ndc = new THREE.Vector2();
   const ptr = { x: 0, y: 0, inside: false, dirty: false, down: null, lastHover: 0 };
   let hoverIndex = null, pinnedModule = null, measuring = false;
-  const canvas = renderer.domElement;
   function setRay(x, y) {
     const r = canvas.getBoundingClientRect();
     ndc.set(((x - r.left) / r.width) * 2 - 1, -((y - r.top) / r.height) * 2 + 1);
@@ -476,7 +645,7 @@ async function boot() {
   }
   canvas.addEventListener('pointermove', (e) => { ptr.x = e.clientX; ptr.y = e.clientY; ptr.inside = true; ptr.dirty = true; ptr.type = e.pointerType; });
   canvas.addEventListener('pointerleave', () => { ptr.inside = false; clearHover(); });
-  canvas.addEventListener('pointerdown', (e) => { ptr.down = { x: e.clientX, y: e.clientY, t: performance.now() }; clearHover(); });
+  canvas.addEventListener('pointerdown', (e) => { lastDrag = performance.now(); ptr.down = { x: e.clientX, y: e.clientY, t: lastDrag }; clearHover(); });
   canvas.addEventListener('pointerup', (e) => {
     const d = ptr.down; ptr.down = null;
     if (!d) return;
@@ -532,6 +701,12 @@ async function boot() {
     const hits = raycastScene(raycaster, roots);
     return hits[0] || null;
   }
+  rig.onDoubleTap = (x, y) => {
+    if (measuring) return;
+    setRay(x, y);
+    const hit = pickSurface();
+    if (hit) rig.focusOn(hit.point);
+  };
   function onClick(x, y, pointerType) {
     setRay(x, y);
     if (measuring) {
@@ -585,6 +760,10 @@ async function boot() {
   // ------------------------------------------------------------ tools
   handlers.onScreenshot = async () => {
     try {
+      post.sceneScale = 1;
+      post.useTwoSamples = false;
+      if (post.gtao) post.gtao.enabled = true;
+      if (post.bloom) post.bloom.enabled = true;
       const stamp = `${T.y}-${String(T.m).padStart(2, '0')}-${String(T.d).padStart(2, '0')}_${fmtMinutes(T.min).replace(':', '')}`;
       const r = await takeScreenshot({
         renderer, post, rig,
@@ -600,18 +779,24 @@ async function boot() {
     if (!d.fullscreenElement) (d.documentElement.requestFullscreen ? d.documentElement.requestFullscreen() : Promise.reject(new Error('unsupported'))).catch(() => ui.toast('Fullscreen is not available here.', 'info'));
     else d.exitFullscreen();
   };
-  function setQuality(q, persist = true) {
+  function setQuality(q) {
     if (!QUALITY[q] || (q === 'ultra' && params.get('quality') !== 'ultra')) return;
     quality = q; ctx.quality = q === 'ultra' ? 'high' : q;
-    R.environment?.setQuality?.(ctx.quality);
+    ctx.textureQuality = ctx.quality === 'high' ? 'high' : 'medium';
+    lighting.quality = q; lighting.requestEnv(true);
+    skyOcc?.setQuality(q);
+    for (const result of Object.values(R)) {
+      const change = result?.setQuality?.(ctx.quality);
+      change?.then(() => refreshSkyOcc()).catch(e => reportOnce('setQuality', e));
+    }
     refreshSkyOcc();
     post.setQuality(q);
     lighting.setShadowMapSize(QUALITY[q].shadow);
     shadowsDirty(); demandRender(1500);
-    motionScale = 1; resScale = 1; ambientSlow = false;
+    motionTier = 0; learnedTier = 0; resScale = 1;
     resize();
     ui.setQuality(q);
-    if (persist) { autoQ = false; try { localStorage.setItem('r2v.quality', q); } catch (e) { /* ignore */ } }
+    try { localStorage.setItem('r2v.quality', q); } catch (e) { /* ignore */ }
   }
   handlers.onQuality = (q) => { setQuality(q); ui.toast(`Render quality: ${QUALITY[q].label}`, 'info', 2000); };
 
@@ -642,8 +827,6 @@ async function boot() {
     }
   });
 
-  renderer.domElement.addEventListener('webglcontextlost', (e) => { e.preventDefault(); ui.toast('Graphics context lost — please reload the page.', 'error', 10000); });
-
   // ------------------------------------------------------------ public API
   const waitFrames = (n = 2) => new Promise((res) => { const target = frameCount + n; const chk = () => { if (frameCount >= target) res(true); else { demandRender(500); requestAnimationFrame(chk); } }; chk(); });
   Object.assign(app, {
@@ -664,7 +847,7 @@ async function boot() {
       if (!m) throw new Error('setTime expects "YYYY-MM-DDTHH:MM" (IST)');
       T.y = +m[1]; T.m = +m[2]; T.d = +m[3]; if (m[4] !== undefined) T.min = +m[4] * 60 + +m[5];
       ui.setDate(T.y, T.m, T.d); applySun();
-      lighting.update(performance.now(), true);
+      if (envReady && !lost) lighting.update(performance.now(), true);
       await waitFrames(2);
       return { azimuth: ctx.sunState.azimuth, elevation: ctx.sunState.elevation };
     },
@@ -685,56 +868,46 @@ async function boot() {
     setMode(mode) { handlers.onMode(mode); return rig.mode; },
     setPanel(open) { ui.setCollapsed(!open); },
     runShade(kind = 'day') { return handlers.onShade(kind); },
-    measure, stats: () => ({ ...post.stats, quality, occluders: occluders.length, animated: animated.length, frameMs: +lastFrameMs.toFixed(1), idleMode, mode: rig.mode, view: rig.currentView }),
+    measure, stats: () => ({ ...post.stats, quality, pixelRatio: post.pixelRatio * resScale, resScale, motionTier,
+      msaa: post.useTwoSamples && post.motionTarget ? 2 : post.samples,
+      canvas: [canvas.width, canvas.height], css: [post.width, post.height], occluders: occluders.length, animated: animated.length, frameMs: +lastFrameMs.toFixed(1), idleMode, mode: rig.mode, view: rig.currentView }),
     invalidate: (ms = 1000) => { shadowsDirty(); demandRender(ms); },
   });
   Object.defineProperty(app, 'camera', { get: () => rig.camera });
   window.__app = app;
 
-  // first sun application to all subscribers (builders subscribed during build)
-  applySun(true);
-  lighting.update(performance.now(), true);
-  const startView = VIEWS[params.get('view')] ? params.get('view') : 'overview';
-  rig.flyTo(startView, { instant: true });
-  post.setCamera(rig.camera);
-  ui.setLoading(94, `Step ${BUILDERS.length + 1} of ${BUILDERS.length + 1} · Compiling shaders & lighting the scene…`);
+  ui.setActiveView(rig.currentView);
+  ui.setMode(rig.mode);
+  ui.setDrone(rig.controls.autoRotate);
+  ui.setLoading(94, `Step ${early.length + 1} of ${early.length + 1} · Compiling shaders & lighting the scene…`);
   await nextFrame();
-  mark('compile');
-  // Compile in the background where the driver supports it (KHR_parallel_shader_compile).
-  // The scene is drawn into the post chain's linear HDR target (no tone mapping, linear output),
-  // so compile with that target bound — otherwise every program is built for the wrong variant
-  // and compiled a second time on the first frame (≈ 8 s on ANGLE/D3D11).
-  try {
-    const prevRT = renderer.getRenderTarget();
-    renderer.setRenderTarget(post.composer.readBuffer);
-    let p;
-    try { p = renderer.compileAsync(scene, rig.camera); } finally { renderer.setRenderTarget(prevRT); }
-    await p;
-  } catch (e) { /* first frame compiles whatever is left */ }
+  await Promise.all(earlyPrograms);
+  earlyPrograms.length = 0;
   mark('compiled');
 
   // ------------------------------------------------------------ main loop
-  // Render on demand: a frame is drawn only while something changes (camera, sun, UI, panel) and,
-  // briefly after interaction, at a reduced rate for registered ambient animations. When the scene is left alone the GPU goes idle. ?idle=0 renders
-  // continuously. On a software renderer / very slow device ("idleMode") time steps are coarser.
+  // The sun-path callback positions labels when the camera changes. A still
+  // camera, static sun and unchanged layers require no ambient or heartbeat frames.
   const clock = new THREE.Clock();
   let fpsAcc = 0, fpsN = 0, lastStats = 0, fps = 0, elapsed = 0, lastRender = 0, lastDeclutter = 0;
-  let lastInput = performance.now(), prevTickRendered = false, pointerDown = false, lastZoom = 1;
+  let prevTickRendered = false, lastZoom = 1;
   const lastCamPos = new THREE.Vector3(), lastCamQuat = new THREE.Quaternion(), DEG = Math.PI / 180;
-  renderer.domElement.addEventListener('pointerdown', () => { pointerDown = true; });
-  for (const ev of ['pointerup', 'pointercancel', 'blur']) addEventListener(ev, () => { pointerDown = false; });
+  canvas.addEventListener('pointermove', e => { if (e.buttons || (e.pointerType === 'touch' && ptr.down)) lastDrag = performance.now(); });
+  canvas.addEventListener('wheel', () => { lastDrag = performance.now(); }, {passive:true});
   const continuous = params.get('idle') === '0';
-  const AMBIENT_FPS = 24, AMBIENT_MS = 12000;
-  const slowSamples = [], motionSamples = [], ambientSamples = [];
+  let slowFrames = 0, motionCount = 0;
+  const motionSamples = new Float32Array(ctx.isPhone ? 25 : 5);
+  const visibleDetails = [];
   idleMode = params.get('idle') === '1' || (!continuous && renderer.getContext && /SwiftShader|llvmpipe|Software/i.test(rendererName(renderer)));
   for (const ev of ['pointerdown', 'pointermove', 'wheel', 'keydown', 'input', 'change', 'click', 'touchmove']) {
-    addEventListener(ev, () => { lastInput = performance.now(); demandRender(ev === 'pointermove' ? 400 : 1500); }, { passive: true, capture: true });
+    addEventListener(ev, () => { demandRender(ev === 'pointermove' ? 400 : 1500); }, { passive: true, capture: true });
   }
   addEventListener('resize', () => demandRender(1500));
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { lastInput = performance.now(); demandRender(1500); } });
-  demandRender(3000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { demandRender(1500); } });
+  let completing = false;
   const elevationBackdrop = createElevationBackdrop(renderer, scene, lighting);
   const loop = () => {
+    if (lost) return;
     const rawDt = clock.getDelta();
     const dt = Math.min(rawDt, 0.1);
     const now = performance.now();
@@ -764,62 +937,112 @@ async function boot() {
     const street = rig.mode === 'persp' && rig.camera.position.y < 6;
     if (street !== document.body.classList.contains('street')) document.body.classList.toggle('street', street);
     lighting.envInterval = playing ? 1000 : 250;
-    if (lighting.update(now)) busy = true;
+    if (envReady && lighting.update(now)) busy = true;
     updateHover(now);
     updateMeasureGhost(now);
     // adaptive resolution (not on software renderers: they render on demand at full size).
-    // "Moving" = the image shifts by more than ~0.6 px per tick (the long damping tail counts as still).
+    // Only recent input or an active camera animation qualifies; a held pointer settles.
     const cam = rig.camera;
     const dist = Math.max(1, cam.position.distanceTo(rig.controls.target));
     const camMotion = Math.max(cam.position.distanceTo(lastCamPos) / dist, 2 * Math.acos(Math.min(1, Math.abs(cam.quaternion.dot(lastCamQuat)))));
     lastCamPos.copy(cam.position); lastCamQuat.copy(cam.quaternion);
     const pxPerRad = innerHeight / ((cam.isPerspectiveCamera ? cam.fov : 45) * DEG);
     const zooming = cam.isOrthographicCamera && cam.zoom !== lastZoom; lastZoom = cam.zoom;
-    const moving = !idleMode && !continuous && (pointerDown || playing || zooming || (camBusy && camMotion * pxPerRad > 0.6));
-    setResScale(moving ? motionScale : 1);
-    const active = busy || camBusy || playing || now < renderUntil;
-    if (lastWasAmbient) { // rAF interval right after an ambient frame ≈ its GPU cost
-      lastWasAmbient = false; ambientSamples.push(rawDt);
-      if (ambientSamples.length >= 9) { ambientSlow = [...ambientSamples].sort((a, b) => a - b)[4] > 1 / 30; ambientSamples.length = 0; }
+    const automatic = rig.anim || rig.controls.autoRotate || playing;
+    const moving = window.__ready && !idleMode && (automatic || now - lastDrag < 105) &&
+      (zooming || camMotion * pxPerRad > .2);
+    if (moving) motionTier = learnedTier;
+    else {
+      if (motionTier || resScale !== 1) busy = true;
+      motionTier = 0; motionCount = 0;
     }
-    const ambient = !idleMode && !active && !ambientSlow && motionScale > 0.95 && animated.length > 0
-      && now - lastInput < AMBIENT_MS && now - lastRender >= 1000 / AMBIENT_FPS - 4;
-    const due = continuous || active || ambient || now - lastRender > (idleMode ? 6000 : 3000);
-    if (!due) { prevTickRendered = false; return; }
-    lastWasAmbient = ambient;
+    if (post.bloom) post.bloom.enabled = motionTier < 1;
+    if (post.gtao) post.gtao.enabled = motionTier < 2;
+    post.useTwoSamples = motionTier >= 3 && motionPrepared && !!post.motionTarget;
+    const distant = !ctx.isPhone && rig.metresPerPixel() > .09;
+    const farView = motionTier >= 4 && distant && motionPrepared && !!post.motionTarget && quality === 'medium';
+    const farMaterials = farView && diffuseRevision === lighting.revision;
+    const ground = R.environment?.ground;
+    const groundMaterial = ground?.material;
+    const useGroundAtlas = farView && ground && post.groundRevision === sceneRevision &&
+      post.groundLightRevision === lighting.revision;
+    resScale = motionTier < 5 ? 1 : ctx.isPhone ? Math.min(1, Math.max(.8, 1.5 / basePixelRatio())) : .85;
+    post.sceneScale = resScale;
+    const active = frameDirty || busy || camBusy || playing || now < renderUntil;
+    // Coalesce streamed geometry and shadow changes. Input still gets every frame.
+    if (window.__firstPaint && !window.__ready && !completing && !camBusy && !busy &&
+        !ptr.down && now - lastDrag > 105 && (!frameDirty || now - lastRender < 110)) {
+      prevTickRendered = false; return;
+    }
+    if (!continuous && !active && !recovering) {
+      prevTickRendered = false;
+      if (motionPrepared && post.terrainMaterial && !playing && !ptr.down && now - lastDrag > 300 &&
+          (post.groundRevision !== sceneRevision || post.groundLightRevision !== lighting.revision)) {
+        cacheGround();
+        void sampleDistantLighting();
+      }
+      return;
+    }
+    const paceGPU = !window.__ready || !ctx.isPhone || learnedTier > 0;
+    if (paceGPU && post.gpuFramesPending() >= 2 && !recovering) {
+      frameDirty = true;
+      return;
+    }
+    frameDirty = false;
     compass.update(rig.heading());
     scaleBar.update(rig.metresPerPixel(), rig.mode === 'ortho' && ui.layerState('compass'));
     labelRenderer.render(scene, rig.camera);
-    if (labels.declutter && now - lastDeclutter > 250) { lastDeclutter = now; try { labels.declutter(); } catch (e) { reportOnce('labels.declutter', e); } }
+    if (declutterReady && labels.declutter && now - lastDeclutter > 250) { lastDeclutter = now; try { labels.declutter(); } catch (e) { reportOnce('labels.declutter', e); } }
     // animation time = real time since the previous rendered frame (frames are skipped when idle)
     const adt = Math.min(lastRender ? (now - lastRender) / 1000 : dt, idleMode ? 1 : 0.1);
     elapsed += adt;
     for (const fn of animated) { try { fn(adt, elapsed); } catch (e) { reportOnce('animated', e); } }
     const t0 = performance.now();
-    post.render(adt);
+    // Freeze the last complete sun map during a slow drag. Restore pending refreshes on release.
+    const loadingShadow = window.__firstPaint && !window.__ready && !completing &&
+      (now - lastDrag < 105 || now - lastShadowDraw < 450);
+    const holdShadow = (motionTier >= 2 || loadingShadow) && renderer.shadowMap.needsUpdate;
+    if (holdShadow) renderer.shadowMap.needsUpdate = false;
+    else if (renderer.shadowMap.needsUpdate) lastShadowDraw = now;
+    if (motionTier >= 4 && distant) for (const mesh of farDetails) {
+      if (mesh.visible) { mesh.visible = false; visibleDetails.push(mesh); }
+    }
+    if (farMaterials) post.useFarMaterials(true);
+    if (useGroundAtlas) ground.material = post.terrainMaterial;
+    try { post.render(adt); if (paceGPU) post.trackSubmission(); }
+    finally {
+      if (useGroundAtlas) ground.material = groundMaterial;
+      if (farMaterials) post.useFarMaterials(false);
+      for (const mesh of visibleDetails) mesh.visible = true;
+      visibleDetails.length = 0;
+      if (holdShadow) renderer.shadowMap.needsUpdate = true;
+    }
+    if (recovering && !renderer.getContext().isContextLost()) { recovering = false; ui.hideContextLost(); }
     lastFrameMs = performance.now() - t0;
+    const drawInterval = (now - lastRender) / 1000;
     lastRender = now;
     frameCount++;
     if (frameCount <= 3) mark('frame' + frameCount);
-    if (prevTickRendered) { fpsAcc += rawDt; fpsN++; }
+    if (prevTickRendered) { fpsAcc += drawInterval; fpsN++; }
     // auto-detect a very slow device → idle mode
-    if (!idleMode && frameCount > 3 && !continuous) {
-      slowSamples.push(rawDt); if (slowSamples.length > 6) slowSamples.shift();
-      if (slowSamples.length === 6 && slowSamples.every((v) => v > 0.6)) { idleMode = true; console.log('[app] slow renderer → idle rendering'); }
+    if (window.__ready && prevTickRendered && !idleMode && !continuous) {
+      slowFrames = rawDt > .6 ? slowFrames + 1 : 0;
+      if (slowFrames === 6) { idleMode = true; console.log('[app] slow renderer → idle rendering'); }
     }
-    // learn the motion resolution from the frame rate while moving: aim for ≥ 40 fps
-    if (moving && prevTickRendered && frameCount > 10) {
-      motionSamples.push(rawDt);
-      if (motionSamples.length >= 24) {
-        const med = [...motionSamples].sort((a, b) => a - b)[12]; motionSamples.length = 0;
-        const lo = minMotionScale();
-        if (med > 1 / 40 && motionScale > lo + 0.01) motionScale = Math.max(lo, motionScale * (med > 1 / 25 ? 0.75 : 0.88));
-        else if (med < 1 / 54 && motionScale < 1) motionScale = Math.min(1, motionScale / 0.9);
-        else if (med > 1 / 28 && autoQ && quality === 'high') {
-          // still sluggish at the lowest motion resolution → automatically picked High steps down once
-          setQuality('medium', false);
-          console.log(`[app] ${(1 / med).toFixed(0)} fps while moving → quality medium`);
-          ui.toast('Switched to Medium quality for smoother movement (Tools → Quality to change).', 'info', 5000);
+    // Reduce optional passes before changing pixel density on sustained slow orbits.
+    if (moving && prevTickRendered) {
+      motionSamples[motionCount++] = drawInterval;
+      if (motionCount === motionSamples.length) {
+        const median = motionSamples.sort()[motionSamples.length >> 1]; motionCount = 0;
+        // Low has only a resolution rung. Keep the accepted phone budget there;
+        // a single missed desktop vsync can already justify removing bloom.
+        const budget = ctx.isPhone && quality === 'low' ? .034 : .020;
+        if (median > budget && learnedTier < 5) {
+          if (post.bloom && learnedTier < 1) learnedTier = 1;
+          else if ((post.gtao || renderer.shadowMap.needsUpdate) && learnedTier < 2) learnedTier = 2;
+          else if (motionPrepared && post.motionTarget && learnedTier < 3) learnedTier = 3;
+          else if (distant && farDetails.length && learnedTier < 4) learnedTier = 4;
+          else learnedTier = 5;
         }
       }
     }
@@ -833,20 +1056,111 @@ ${(post.stats.triangles / 1e6).toFixed(2)} M triangles / frame
 ${info.memory.geometries} geometries · ${info.memory.textures} textures
 ${occluders.length} occluders · ${animated.length} animated`);
     }
-    if (frameCount === 3) {
-      ui.setLoading(100, 'Ready');
-      ui.hideLoader();
-      window.__ready = true; mark('ready');
-      console.log('[app] ready', app.stats());
-    }
   };
+  resumeLoop = loop;
+  app.freeze = (on = true) => {
+    frozen = !!on;
+    renderer.setAnimationLoop(frozen || lost ? null : loop);
+    if (!on) demandRender();
+    return frozen;
+  };
+  if (lost) await restored;
+  loop();
+  ui.setLoading(100, 'Ready');
+  ui.hideLoader(); ui.showGestureHint();
+  mark('first-paint'); window.__firstPaint = true;
+  window.__bootMs.firstPaint = performance.now();
   renderer.setAnimationLoop(loop);
-  // pause/resume the render loop (handy for headless capture of a finished frame)
-  app.freeze = (on = true) => { renderer.setAnimationLoop(on ? null : loop); if (!on) demandRender(1500); return !!on; };
+
+  async function finish(key) {
+    await breathe();
+    const result = R[key];
+    if (!result?.finish) return;
+    watch(result.group);
+    try { await result.finish(); await publish(); }
+    catch (e) {
+      reportOnce(key + '.finish', e);
+      ui.toast(`${BUILDERS.find(b => b.key === key).label}: module failed to load — continuing without it.`, 'warn', 6000);
+    } finally {
+      result.group.traverse(o => o.removeEventListener('childadded', onChild));
+      ctx.invalidate();
+    }
+    mark('finished:' + key);
+  }
+  if (params.get('holdfinish') !== '1') {
+    await nextFrame();
+    await finish('buildings');
+    await finish('solar');
+    await breathe();
+    await build(BUILDERS.find(b => b.key === 'structures'));
+    layerAvail.context = !!(R.structures?.setContextVisible || R.environment?.setContextVisible);
+    ui.setLayerAvailable('context', layerAvail.context);
+    R.structures?.setContextVisible(ui.layerState('context'));
+    await finish('structures');
+    await finish('environment');
+    await breathe();
+    await build(BUILDERS.find(b => b.key === 'sunpath'));
+    layerAvail.sunpath = !!R.sunpath?.group;
+    ui.setLayerAvailable('sunpath', layerAvail.sunpath);
+    applyLayer('sunpath', ui.layerState('sunpath'));
+    await breathe();
+    mark('environment-lighting:start');
+    try { await lighting.prepare(breathe); }
+    catch (e) {
+      if (lost) await restored;
+      lighting.update(performance.now(), true);
+    }
+    envReady = true;
+    mark('environment-lighting:end');
+    await breathe();
+    mark('skyocc:start');
+    try { skyOcc.patchScene(); skyOcc.update(); } catch (e) { reportOnce('skyocc', e); }
+    mark('skyocc');
+    await breathe();
+    await prepareColorMipmaps(scene, breathe);
+    declutterReady = true; labels.declutter?.();
+    await breathe();
+    try { shadingMod = await import('./analysis/shading.js'); }
+    catch (e) { console.warn('[app] shading.js unavailable', e); }
+    ui.shade.setAvailable(!!shadingMod);
+    await satellite;
+    try {
+      post.prepareMotion(ctx.isPhone);
+      await post.prepareFarMaterials(rig.camera, yieldToInput);
+      collectFarDetails();
+      motionPrepared = true;
+    } catch (err) { console.warn('[app] motion framebuffer unavailable', err); }
+    completing = true;
+    ctx.invalidate();
+    await waitFrames(1);
+    completing = false;
+    let readMotionTier;
+    if (motionPrepared) try {
+      cacheGround();
+      await sampleDistantLighting();
+      readMotionTier = await post.warmMotion(rig.camera, R.environment?.ground, farDetails, yieldToInput);
+    } catch (err) {
+      motionPrepared = false;
+      console.warn('[app] motion warm-up unavailable', err);
+    }
+    post.trackSubmission();
+    // The first orbit must not inherit driver work from the last lighting/geometry uploads.
+    const finalDraw = post.fences.at(-1);
+    while (!lost && post.gpuFramesPending() && post.fences.includes(finalDraw)) await nextFrame();
+    if (lost) await restored;
+    if (readMotionTier && !lost) learnedTier = readMotionTier();
+    if (!ptr.down && performance.now() - lastDrag > 105) renderUntil = performance.now();
+  }
+  enableAnalysis();
+  window.__bootMs.ready = performance.now();
+  mark('ready'); window.__ready = true;
+  console.log('[app] ready', app.stats());
 }
 
 // ---------------------------------------------------------------- helpers
 function demandRender(ms = 1000) { renderUntil = Math.max(renderUntil, performance.now() + ms); }
+/** A phone: finger input and a small screen (tablets and touch laptops are not phones). */
+function isPhoneScreen() { return matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 600; }
 function rendererName(renderer) {
   try {
     const gl = renderer.getContext(); const ext = gl.getExtension('WEBGL_debug_renderer_info');

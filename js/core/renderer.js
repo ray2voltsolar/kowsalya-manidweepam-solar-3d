@@ -1,10 +1,8 @@
 // ============================================================================
 //  Renderer, quality presets and post-processing chain.
-//  RenderPass → GTAO (high) → UnrealBloom (subtle, high/medium) → OutputPass → SMAA / FXAA
+//  Multisampled HDR scene, optional AO and bloom, then a display-space grade.
 // ============================================================================
 import * as THREE from 'three';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
@@ -40,16 +38,15 @@ THREE.ShaderChunk.shadowmap_pars_fragment = shadowChunk.replace('if ( frustumTes
   if ( frustumTest ) {`);
 
 export const QUALITY = {
-  ultra:  { label: 'Ultra',  pixelRatio: 2,   shadow: 8192, gtao: true,  bloom: true,  aa: 'smaa' },
-  high:   { label: 'High',   pixelRatio: 2,   shadow: 4096, gtao: true,  bloom: true,  aa: 'smaa' },
-  medium: { label: 'Medium', pixelRatio: 2,   shadow: 2048, gtao: false, bloom: true,  aa: 'smaa' },
-  low:    { label: 'Low',    pixelRatio: 2,   shadow: 1024, gtao: false, bloom: false, aa: 'smaa' },
+  ultra:  { label: 'Ultra',  pixelRatio: 2,   shadow: 8192, gtao: true,  bloom: true },
+  high:   { label: 'High',   pixelRatio: 2,   shadow: 4096, gtao: true,  bloom: true },
+  medium: { label: 'Medium', pixelRatio: 2,   shadow: 2048, gtao: false, bloom: true },
+  low:    { label: 'Low',    pixelRatio: 2,   shadow: 2048, gtao: false, bloom: false },
 };
 
 const GradeShader = {
   name: 'GradeShader',
   uniforms: {
-    tDiffuse: { value: null },
     uBalance: { value: new THREE.Vector3(1, 1, 1) },
     uContrast: { value: 1.08 },
     uSat: { value: 1.02 },
@@ -57,17 +54,15 @@ const GradeShader = {
     uVignette: { value: 0.16 },
     uLift: { value: 0 },
   },
-  vertexShader: /* glsl */`varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
   fragmentShader: /* glsl */`
-    uniform sampler2D tDiffuse; uniform vec3 uBalance; uniform float uContrast; uniform float uSat;
-    uniform float uShoulder; uniform float uVignette; uniform float uLift; varying vec2 vUv;
+    uniform vec3 uBalance; uniform float uContrast; uniform float uSat;
+    uniform float uShoulder; uniform float uVignette; uniform float uLift;
     vec3 shoulder(vec3 x) { // linear below uShoulder, smooth roll-off to ≈0.94 above
       float s = uShoulder, r = 0.94 - s;
       vec3 over = max(x - s, 0.0);
       return min(x, vec3(s)) + r * (1.0 - exp(-over / r));
     }
-    void main() {
-      vec4 c = texture2D(tDiffuse, vUv);
+    vec4 gradeColor(vec4 c, vec2 vUv) {
       vec3 col = c.rgb * uBalance;
       // S-curve around mid-grey (display space)
       col = clamp(col, 0.0, 1.2);
@@ -81,7 +76,7 @@ const GradeShader = {
       col += uLift * lw * vec3(0.62, 0.74, 1.0);
       // vignette
       vec2 q = vUv - 0.5; float v = 1.0 - uVignette * smoothstep(0.25, 0.85, dot(q, q) * 2.2);
-      gl_FragColor = vec4(col * v, c.a);
+      return vec4(col * v, c.a);
     }`,
 };
 
@@ -112,39 +107,46 @@ export function autoQuality(renderer) {
 
 // Explicit levels keep byte-backed sRGB albedo textures complete on integrated WebGL
 // drivers. Missing lower levels otherwise turn powder-coated equipment black at distance.
-export function prepareColorMipmaps(scene) {
+export async function prepareColorMipmaps(scene, breathe) {
+  const maps = new Set();
   scene.traverse(o => {
     for (const material of Array.isArray(o.material) ? o.material : [o.material]) {
       const map = material?.map;
       if (!map?.isDataTexture || !map.generateMipmaps || map.mipmaps.length ||
           map.type !== THREE.UnsignedByteType || map.format !== THREE.RGBAFormat ||
           map.colorSpace !== THREE.SRGBColorSpace) continue;
-      const base = map.image;
-      const canvas = document.createElement('canvas');
-      canvas.width = base.width; canvas.height = base.height;
-      const g = canvas.getContext('2d', {willReadFrequently:true});
-      g.putImageData(new ImageData(new Uint8ClampedArray(base.data), base.width, base.height), 0, 0);
-      const levels = [base];
-      let w = base.width, h = base.height;
-      while (w > 1 || h > 1) {
-        const nextW = Math.max(1, w >> 1), nextH = Math.max(1, h >> 1);
-        g.drawImage(canvas, 0, 0, w, h, 0, 0, nextW, nextH);
-        levels.push({width:nextW, height:nextH, data:new Uint8Array(g.getImageData(0,0,nextW,nextH).data.buffer)});
-        w = nextW; h = nextH;
-      }
-      map.mipmaps = levels;
-      map.generateMipmaps = false;
-      map.needsUpdate = true;
+      maps.add(map);
     }
   });
+  for (const map of maps) {
+    const base = map.image;
+    const canvas = document.createElement('canvas');
+    canvas.width = base.width; canvas.height = base.height;
+    const g = canvas.getContext('2d', {willReadFrequently:true});
+    g.putImageData(new ImageData(new Uint8ClampedArray(base.data), base.width, base.height), 0, 0);
+    const levels = [base];
+    let w = base.width, h = base.height;
+    while (w > 1 || h > 1) {
+      const nextW = Math.max(1, w >> 1), nextH = Math.max(1, h >> 1);
+      g.drawImage(canvas, 0, 0, w, h, 0, 0, nextW, nextH);
+      levels.push({width:nextW, height:nextH, data:new Uint8Array(g.getImageData(0,0,nextW,nextH).data.buffer)});
+      w = nextW; h = nextH;
+    }
+    map.mipmaps = levels;
+    map.generateMipmaps = false;
+    map.needsUpdate = true;
+    canvas.width = canvas.height = 0;
+    if (breathe) await breathe();
+  }
 }
 
 export function createRenderer(container) {
   const renderer = new THREE.WebGLRenderer({
-    antialias: false, // AA is done in post (SMAA/FXAA)
+    antialias: false, // The scene target owns the samples.
     powerPreference: 'high-performance',
     alpha: false,
     stencil: false,
+    depth: false, // The canvas receives only the graded fullscreen triangle.
   });
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -158,40 +160,53 @@ export function createRenderer(container) {
   return renderer;
 }
 
-/** Post-processing chain; rebuild() whenever the camera object or quality changes. */
+/** Scene and post targets are allocated per tier and reused across frames and camera changes. */
 export class PostFX {
   constructor(renderer, scene, camera, quality) {
     this.renderer = renderer; this.scene = scene; this.camera = camera; this.quality = quality;
     this.width = 1; this.height = 1; this.pixelRatio = 1;
     this.stats = { calls: 0, triangles: 0 };
+    this.fences = [];
+    this.authoredHooks = new WeakMap();
+    this.farMeshes = [];
+    this.farSky = {value: new Float32Array(18)};
+    this.farIntensity = {value: 1};
+    this.farMaterials = new Map();
     this.enabled = true;
     this.rebuild();
   }
 
   rebuild() {
-    if (this.composer) {
-      this.composer.passes.forEach((p) => p.dispose && p.dispose());
-      this.composer.dispose();
-    }
-    const q = QUALITY[this.quality];
-    const r = this.renderer;
-    const composer = new EffectComposer(r);
-    composer.setPixelRatio(this.pixelRatio);
-    composer.setSize(this.width, this.height);
+    for (const m of this.farMaterials.values()) m.dispose();
+    this.farMaterials.clear();
+    this.farMeshes.length = 0;
+    this.terrainAtlas?.dispose();
+    this.terrainMaterial?.dispose();
+    this.terrainAtlas = this.terrainMaterial = null;
+    this.groundRevision = -1;
+    for (const resource of [this.sceneTarget, this.motionTarget, this.aux, this.grade, this.aa, this.gtao, this.bloom]) resource?.dispose();
+    const q = QUALITY[this.quality], r = this.renderer, gl = r.getContext();
     const w = this.width, h = this.height;
-
-    const renderPass = new RenderPass(this.scene, this.camera);
-    const origRender = renderPass.render.bind(renderPass);
-    renderPass.render = (...a) => {
-      r.info.reset();
-      origRender(...a);
-      this.stats.calls = r.info.render.calls; this.stats.triangles = r.info.render.triangles;
-    };
-    composer.addPass(renderPass);
-    this.renderPass = renderPass;
-
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    const software = /SwiftShader|llvmpipe|Software|Basic Render/i.test(
+      gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
+    const hdr = r.extensions.has('EXT_color_buffer_float') || r.extensions.has('EXT_color_buffer_half_float');
+    const supported = hdr && gl.getInternalformatParameter(gl.RENDERBUFFER, gl.RGBA16F, gl.SAMPLES);
+    this.samples = !software && r.capabilities.maxSamples >= 4 && supported && supported.includes(4) ? 4 : 0;
+    const type = hdr ? THREE.HalfFloatType : THREE.UnsignedByteType;
+    this.sceneTarget = new THREE.WebGLRenderTarget(1, 1, {type, samples: this.samples, resolveDepthBuffer: false});
+    this.motionTarget = null;
+    this.canUseTwoSamples = this.samples === 4 && supported.includes(2);
+    this.sceneScale = 1;
+    this.useTwoSamples = false;
+    this.aa = this.samples ? null : software ? new ShaderPass(FXAAShader) : new SMAAPass(1, 1);
+    this.fxaa = software ? this.aa : null;
+    for (const rt of [this.aa?.edgesRT, this.aa?.weightsRT]) {
+      if (rt) { rt.texture.type = THREE.UnsignedByteType; rt.depthBuffer = false; }
+    }
+    this.aux = q.gtao || this.aa ? new THREE.WebGLRenderTarget(1, 1, {type, depthBuffer:false}) : null;
     this.gtao = null;
-    if (q.gtao) {
+    if (q.gtao && hdr) {
       const gtao = new GTAOPass(this.scene, this.camera, w, h);
       gtao.output = GTAOPass.OUTPUT.Default;
       gtao.blendIntensity = 1.0;
@@ -212,16 +227,16 @@ export class PostFX {
           if (o.isSprite || o.isCSS2DObject) { if (!this._visibilityCache.has(o)) this._visibilityCache.set(o, o.visible); o.visible = false; }
         });
       };
-      composer.addPass(gtao);
       this.gtao = gtao;
     }
 
     this.bloom = null;
-    if (q.bloom) {
+    if (q.bloom && hdr) {
       // threshold is in linear HDR (pre-exposure) units; only sun glints & emissive lamps exceed it.
       const bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.12, 0.35, 6.0);
       // A single invalid HDR reflection can spread across an entire blur pyramid.
       // Reject non-finite samples before filtering and cap the energy of tiny glints.
+      for (const rt of [bloom.renderTargetBright, ...bloom.renderTargetsHorizontal, ...bloom.renderTargetsVertical]) rt.depthBuffer = false;
       const prefilter = bloom.materialHighPassFilter;
       prefilter.fragmentShader = prefilter.fragmentShader.replace('float v = luminance', `
         if (any(isnan(texel)) || any(isinf(texel))) texel = vec4(0.0);
@@ -230,37 +245,26 @@ export class PostFX {
       for (const material of [prefilter, ...bloom.separableBlurMaterials, bloom.compositeMaterial, bloom.blendMaterial]) {
         if (material) { material.depthTest = false; material.depthWrite = false; }
       }
-      composer.addPass(bloom);
       this.bloom = bloom;
     }
 
-    composer.addPass(new OutputPass());
-
-    // Display-space colour grade (cheap, all qualities): filmic highlight shoulder so white masonry /
-    // PPGI never clips, gentle S-curve for midtone contrast, neutral-warm balance (removes the
-    // cyan-pastel cast), a touch of vignette; warmer/rosier at golden hour & dusk.
-    const grade = new ShaderPass(GradeShader);
-    composer.addPass(grade);
-    this.grade = grade;
+    // OutputPass maintains Three's exact exposure, tone mapping and transfer function.
+    // Append the existing display-space grade to its fragment shader before the write.
+    const output = new OutputPass();
+    output.material.fragmentShader = output.material.fragmentShader
+      .replace('uniform sampler2D tDiffuse;', 'uniform sampler2D tDiffuse; uniform vec2 sourceScale;')
+      .replace('texture2D( tDiffuse, vUv )', 'texture2D( tDiffuse, vUv * sourceScale )')
+      .replace('void main()', GradeShader.fragmentShader + '\nvoid main()')
+      .replace(/}\s*$/, 'gl_FragColor = gradeColor(gl_FragColor, vUv);\n}');
+    Object.assign(output.uniforms, THREE.UniformsUtils.clone(GradeShader.uniforms));
+    output.uniforms.sourceScale = {value: new THREE.Vector2(1, 1)};
+    this.grade = output;
+    for (const mat of [output.material, this.aa?.material, this.aa?.materialEdges,
+      this.aa?.materialWeights, this.aa?.materialBlend]) {
+      if (mat) { mat.depthTest = false; mat.depthWrite = false; }
+    }
     this._applyGrade();
-
-    this.fxaa = null;
-    if (q.aa === 'smaa') {
-      composer.addPass(new SMAAPass(w * this.pixelRatio, h * this.pixelRatio));
-    } else {
-      const fxaa = new ShaderPass(FXAAShader);
-      composer.addPass(fxaa);
-      this.fxaa = fxaa;
-    }
-    // The composer alternates two targets which also hold scene depth. A colour-only
-    // fullscreen pass must cover every pixel, even where a previous pass wrote depth.
-    for (const pass of composer.passes) {
-      for (const material of [pass.material, pass.materialEdges, pass.materialWeights, pass.materialBlend]) {
-        if (material) { material.depthTest = false; material.depthWrite = false; }
-      }
-    }
-    this.composer = composer;
-    this._updateFxaa();
+    this._sizeTargets();
   }
 
   /** golden 0…1 (low sun warmth), dusk 0…1 (civil twilight), night 0…1 */
@@ -282,20 +286,305 @@ export class PostFX {
     if (this.fxaa) this.fxaa.material.uniforms.resolution.value.set(1 / (this.width * this.pixelRatio), 1 / (this.height * this.pixelRatio));
   }
 
-  setCamera(camera) { if (camera !== this.camera) { this.camera = camera; this.rebuild(); } }
+  setCamera(camera) {
+    if (camera === this.camera) return;
+    this.camera = camera;
+    if (this.gtao) {
+      this.gtao.camera = camera;
+      this.gtao.gtaoMaterial.defines.PERSPECTIVE_CAMERA = camera.isPerspectiveCamera ? 1 : 0;
+      this.gtao.gtaoMaterial.needsUpdate = true;
+    }
+  }
+
   setQuality(q) { if (q !== this.quality) { this.quality = q; this.rebuild(); } }
 
-  setSize(w, h, pixelRatio) {
-    this.width = w; this.height = h; this.pixelRatio = pixelRatio;
-    this.renderer.setPixelRatio(pixelRatio);
-    this.renderer.setSize(w, h, true);
-    this.composer.setPixelRatio(pixelRatio);
-    this.composer.setSize(w, h);
+  _sizeTargets() {
+    const w = Math.max(1, Math.floor(this.width * this.pixelRatio));
+    const h = Math.max(1, Math.floor(this.height * this.pixelRatio));
+    for (const pass of [this.sceneTarget, this.aux, this.aa, this.bloom, this.gtao]) pass?.setSize(w, h);
     this._updateFxaa();
   }
 
+  setSize(w, h, pixelRatio) {
+    if (this.width === w && this.height === h && this.pixelRatio === pixelRatio) return;
+    this.width = w; this.height = h; this.pixelRatio = pixelRatio;
+    this.renderer.setDrawingBufferSize(w, h, pixelRatio);
+    this.renderer.domElement.style.width = w + 'px';
+    this.renderer.domElement.style.height = h + 'px';
+    this._sizeTargets();
+  }
+
+  prepareMotion(isPhone) {
+    // The phone keeps its single scene target. Large print surfaces also avoid a second HDR buffer.
+    if (!this.canUseTwoSamples || isPhone || this.quality === 'low' ||
+        this.sceneTarget.width * this.sceneTarget.height > 3200000) {
+      this.motionTarget?.dispose();
+      this.motionTarget = null;
+      return;
+    }
+    this.motionTarget ??= new THREE.WebGLRenderTarget(1, 1, {
+      type: this.sceneTarget.texture.type, samples: 2, resolveDepthBuffer: false,
+    });
+    this.motionTarget.setSize(this.sceneTarget.width, this.sceneTarget.height);
+    this.renderer.initRenderTarget(this.motionTarget);
+  }
+
+  rememberMaterials(root) {
+    root.traverse(o => {
+      const m = o.material;
+      if (m?.isMeshStandardMaterial && !this.authoredHooks.has(m))
+        this.authoredHooks.set(m, m.onBeforeCompile);
+    });
+  }
+
+  async prepareFarMaterials(camera, yieldToInput) {
+    for (const m of this.farMaterials.values()) m.dispose();
+    this.farMaterials.clear();
+    this.farMeshes.length = 0;
+    if (!this.motionTarget || this.quality !== 'medium') return;
+    const batch = new THREE.Group();
+    this.scene.traverse(o => {
+      const m = o.material;
+      if (!m?.isMeshStandardMaterial || m.isMeshPhysicalMaterial || m.roughness < .45 ||
+          m.metalness > .4 || m.transparent || !this.authoredHooks.has(m)) return;
+      const hook = this.authoredHooks.get(m);
+      // Foliage's authored cutout/normal hook also works with the Lambert shader.
+      if (hook !== THREE.Material.prototype.onBeforeCompile && !(m.alphaTest && m.alphaToCoverage)) return;
+      let far = this.farMaterials.get(m);
+      if (!far) {
+        far = new THREE.MeshLambertMaterial();
+        for (const key of ['color','vertexColors','map','emissive','emissiveMap','emissiveIntensity',
+          'aoMap','aoMapIntensity','alphaTest','alphaMap','alphaToCoverage','side','shadowSide',
+          'depthTest','depthWrite','polygonOffset','polygonOffsetFactor','polygonOffsetUnits']) far[key] = m[key];
+        far.customProgramCacheKey = () => 'farDiffuse|' + hook.toString();
+        far.onBeforeCompile = (shader, renderer) => {
+          hook.call(far, shader, renderer);
+          shader.uniforms.farSky = this.farSky;
+          shader.uniforms.farIntensity = this.farIntensity;
+          // Axis-aligned walls and roofs use the measured PMREM face directly.
+          // Smooth normals blend the six cardinal irradiances in world space.
+          shader.vertexShader = 'uniform vec3 farSky[6]; varying vec3 vFarFill;\n' + shader.vertexShader
+            .replace('#include <defaultnormal_vertex>', `#include <defaultnormal_vertex>
+              vec3 n = inverseTransformDirection(transformedNormal, viewMatrix);
+              vec3 w = n * n;
+              vFarFill = w.x * (n.x >= 0. ? farSky[0] : farSky[3]) +
+                w.y * (n.y >= 0. ? farSky[1] : farSky[4]) +
+                w.z * (n.z >= 0. ? farSky[2] : farSky[5]);`);
+          shader.fragmentShader = 'varying vec3 vFarFill; uniform float farIntensity;\n' + shader.fragmentShader
+            .replace('#include <lights_fragment_end>', 'irradiance += PI * farIntensity * vFarFill;\n#include <lights_fragment_end>');
+        };
+        this.farMaterials.set(m, far);
+      }
+      this.farMeshes.push({mesh:o, full:m, far});
+      const proxy = Object.create(o);
+      proxy.material = far; proxy.children = [];
+      batch.children.push(proxy);
+    });
+    const r = this.renderer, target = this.motionTarget;
+    const pending = [];
+    const meshes = batch.children;
+    for (let i = 0; i < meshes.length; i += 8) {
+      await yieldToInput();
+      if (target !== this.motionTarget) break;
+      batch.children = meshes.slice(i, i + 8);
+      const previous = r.getRenderTarget();
+      try {
+        r.setRenderTarget(target);
+        pending.push(r.compileAsync(batch, camera, this.scene));
+      } finally { r.setRenderTarget(previous); }
+    }
+    await Promise.all(pending);
+  }
+
+  useFarMaterials(on) {
+    this.farIntensity.value = this.scene.environmentIntensity;
+    for (const {mesh,full,far} of this.farMeshes) {
+      if (mesh.material === (on ? full : far)) mesh.material = on ? far : full;
+    }
+  }
+
+  bakeDistantGround(ground, center, revision) {
+    if (!this.motionTarget || this.quality !== 'medium' || !ground?.isMesh) return;
+    const r = this.renderer, previous = r.getRenderTarget(), dirty = r.shadowMap.needsUpdate;
+    const original = ground.material, blend = original.blending;
+    // Ground and shadows are static between scene edits. Two top-down views retain the
+    // authored satellite and paving colours when the distant terrain is subpixel.
+    this.terrainAtlas ??= new THREE.WebGLRenderTarget(2048, 1024, {
+      type: THREE.HalfFloatType, depthBuffer: false, generateMipmaps:true, minFilter:THREE.LinearMipmapLinearFilter,
+    });
+    const atlas = this.terrainAtlas;
+    const bake = new THREE.Scene();
+    bake.environment = this.scene.environment;
+    bake.environmentIntensity = this.scene.environmentIntensity;
+    bake.fog = this.scene.fog?.clone() ?? null;
+    if (bake.fog) bake.fog.density = 0;
+    bake.children = [ground, ...this.scene.children.filter(o => o.isLight)];
+    const camera = new THREE.OrthographicCamera();
+    camera.up.set(0, 0, -1);
+    camera.position.set(center.x, 150, -center.y);
+    camera.lookAt(center.x, 0, -center.y);
+    try {
+      r.shadowMap.needsUpdate = false;
+      original.blending = THREE.NoBlending;
+      atlas.scissorTest = true;
+      for (const [i, radius] of [256, 2600].entries()) {
+        camera.left = camera.bottom = -radius; camera.right = camera.top = radius;
+        camera.updateProjectionMatrix();
+        atlas.viewport.set(i * 1024, 0, 1024, 1024);
+        atlas.scissor.copy(atlas.viewport);
+        atlas.texture.generateMipmaps = i === 1;
+        r.setRenderTarget(atlas);
+        r.render(bake, camera);
+      }
+    } finally {
+      original.blending = blend;
+      r.shadowMap.needsUpdate = dirty;
+      r.setRenderTarget(previous);
+    }
+    this.terrainMaterial ??= new THREE.ShaderMaterial({
+      transparent:true, fog:true, uniforms:{...THREE.UniformsUtils.clone(THREE.UniformsLib.fog),
+        atlas:{value:atlas.texture}, origin:{value:new THREE.Vector2(center.x, -center.y)}},
+      vertexShader:`varying vec2 offset; uniform vec2 origin;
+        #include <fog_pars_vertex>
+        void main() { vec4 world = modelMatrix * vec4(position, 1.);
+          offset = (world.xz - origin) * vec2(1., -1.);
+          vec4 mvPosition = viewMatrix * world; gl_Position = projectionMatrix * mvPosition;
+          #include <fog_vertex>
+        }`,
+      fragmentShader:`uniform sampler2D atlas; varying vec2 offset;
+        #include <fog_pars_fragment>
+        void main() {
+          vec2 nearUV = clamp(offset / 512. + .5, .001, .999);
+          vec2 farUV = clamp(offset / 5200. + .5, .001, .999);
+          float blend = smoothstep(225., 250., max(abs(offset.x), abs(offset.y)));
+          vec4 farColor = texture2D(atlas, vec2(.5 + .5 * farUV.x, farUV.y));
+          gl_FragColor = mix(texture2D(atlas, vec2(.5 * nearUV.x, nearUV.y)), farColor, blend);
+          #include <fog_fragment>
+        }`,
+    });
+    this.groundRevision = revision;
+  }
+
+  async warmMotion(camera, ground, details, breathe) {
+    if (!this.motionTarget) return;
+    const r = this.renderer, target = this.motionTarget;
+    const previous = r.getRenderTarget(), dirty = r.shadowMap.needsUpdate;
+    const terrain = ground?.material;
+    const viewport = target.viewport.clone();
+    const gl = r.getContext(), timer = gl.getExtension('EXT_disjoint_timer_query_webgl2');
+    const queries = [];
+    const full = this.sceneTarget;
+    const probe = (rt, tier) => {
+      const query = gl.createQuery();
+      r.setRenderTarget(rt);
+      gl.beginQuery(timer.TIME_ELAPSED_EXT, query);
+      try { r.render(this.scene, camera); }
+      finally { gl.endQuery(timer.TIME_ELAPSED_EXT); }
+      queries.push({tier,query});
+    };
+    try {
+      // ANGLE can specialize a linked program for the sample count on its first draw.
+      // Exercise both material sets on the actual two-sample framebuffer.
+      r.shadowMap.needsUpdate = false;
+      target.viewport.set(0, 0, 8, 8);
+      r.setRenderTarget(target);
+      r.render(this.scene, camera);
+      this.useFarMaterials(true);
+      if (ground && this.terrainMaterial) ground.material = this.terrainMaterial;
+      r.render(this.scene, camera);
+    } finally {
+      if (ground) ground.material = terrain;
+      this.useFarMaterials(false);
+      r.shadowMap.needsUpdate = dirty;
+      target.viewport.copy(viewport);
+      r.setRenderTarget(previous);
+    }
+    if (!timer || this.quality !== 'medium') return;
+    // Measure native scene cost after the first actual two-sample draw. Submit
+    // one probe per task so input can interrupt calibration. No readback stalls.
+    for (const tier of [1, 1, 1, 3, 4]) {
+      await breathe();
+      if (this.motionTarget !== target || gl.isContextLost()) break;
+      const visible = tier === 4 ? details.filter(o => o.visible) : [];
+      const saved = r.getRenderTarget(), refresh = r.shadowMap.needsUpdate;
+      try {
+        r.shadowMap.needsUpdate = false;
+        if (tier === 4) {
+          this.useFarMaterials(true);
+          if (ground && this.terrainMaterial) ground.material = this.terrainMaterial;
+          for (const o of visible) o.visible = false;
+        }
+        probe(tier === 1 ? full : target, tier);
+      } finally {
+        if (tier === 4) {
+          if (ground) ground.material = terrain;
+          this.useFarMaterials(false);
+          for (const o of visible) o.visible = true;
+        }
+        r.shadowMap.needsUpdate = refresh;
+        r.setRenderTarget(saved);
+      }
+    }
+    return () => {
+      const times = queries.map(({query}) => {
+        const ms = gl.getQueryParameter(query, gl.QUERY_RESULT_AVAILABLE) ?
+          gl.getQueryParameter(query, gl.QUERY_RESULT) / 1e6 : 0;
+        gl.deleteQuery(query);
+        return ms;
+      });
+      if (times.length !== 5 || times.includes(0) || gl.getParameter(timer.GPU_DISJOINT_EXT)) return 0;
+      if (times.slice(0,3).sort((a,b) => a-b)[1] <= 20) return 0;
+      return times[3] <= 16 ? 3 : times[4] <= 16 ? 4 : 5;
+    };
+  }
+
+  // The GL command queue can accept several costly frames before rAF misses a
+  // vsync. Limit latency by drawing the newest camera pose when capacity returns.
+  gpuFramesPending() {
+    const gl = this.renderer.getContext();
+    while (this.fences.length) {
+      if (gl.clientWaitSync(this.fences[0], 0, 0) === gl.TIMEOUT_EXPIRED) break;
+      gl.deleteSync(this.fences.shift());
+    }
+    return this.fences.length;
+  }
+
+  trackSubmission() {
+    const gl = this.renderer.getContext();
+    const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (sync) this.fences.push(sync);
+    gl.flush();
+  }
+
   render(dt) {
-    if (this.renderPass.camera !== this.camera) this.renderPass.camera = this.camera;
-    this.composer.render(dt);
+    const r = this.renderer;
+    let source = this.useTwoSamples && this.motionTarget || this.sceneTarget;
+    // Keep the canvas native and change only the rendered portion of the existing target.
+    // Grade samples this rectangle and applies the vignette in display coordinates.
+    const w = Math.max(1, Math.floor(source.width * this.sceneScale));
+    const h = Math.max(1, Math.floor(source.height * this.sceneScale));
+    source.viewport.set(0, 0, w, h);
+    source.scissor.copy(source.viewport);
+    source.scissorTest = this.sceneScale < 1;
+    this.grade.uniforms.sourceScale.value.set(w / source.width, h / source.height);
+    r.info.reset();
+    r.setRenderTarget(source);
+    r.render(this.scene, this.camera);
+    this.stats.renderScale = this.sceneScale;
+    this.stats.renderSamples = source.samples;
+    this.stats.calls = r.info.render.calls;
+    this.stats.triangles = r.info.render.triangles;
+    if (this.gtao?.enabled) {
+      this.gtao.render(r, this.aux, source, dt);
+      source = this.aux;
+    }
+    if (this.bloom?.enabled) this.bloom.render(r, null, source, dt, false);
+    this.grade.renderToScreen = !this.aa;
+    const graded = source === this.aux ? this.sceneTarget : this.aux;
+    this.grade.render(r, graded, source);
+    if (this.aa) {
+      this.aa.renderToScreen = true;
+      this.aa.render(r, null, graded, dt);
+    }
   }
 }

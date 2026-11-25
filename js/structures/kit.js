@@ -3,7 +3,6 @@
 //  Plan coords (x=E, y=N, z=up)  →  world (x, z, -y)
 // ============================================================================
 import * as THREE from 'three';
-import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 export const V = (x, y, z = 0) => new THREE.Vector3(x, z, -y);
 export const UP = new THREE.Vector3(0, 1, 0);
@@ -27,35 +26,60 @@ function prep(g) {
 
 /** Collects geometries per material key and merges them into one mesh each. */
 export class Batch {
-  constructor() { this.buckets = new Map(); }
+  constructor() { this.buckets = new Map(); this.colours = new Map(); }
   add(key, g, tint = 0xffffff) {
-    const colour = new THREE.Color(tint);
-    const values = new Float32Array(3 * g.attributes.position.count);
-    for (let i = 0; i < values.length; i += 3) colour.toArray(values, i);
-    g.setAttribute('color', new THREE.BufferAttribute(values, 3));
+    let rgb=this.colours.get(tint);
+    if(!rgb){
+      rgb=new THREE.Color(tint).toArray().map(v=>Math.round(v*65535));
+      this.colours.set(tint,rgb);
+    }
+    const values=new Uint16Array(3*g.attributes.position.count),[r,green,b]=rgb;
+    for(let i=0;i<values.length;i+=3){values[i]=r;values[i+1]=green;values[i+2]=b;}
+    g.setAttribute('color',new THREE.BufferAttribute(values,3,true));
     prep(g);
     if (!this.buckets.has(key)) this.buckets.set(key, []);
     this.buckets.get(key).push(g);
     return g;
   }
-  build(mats, group) {
-    const meshes = {};
-    for (const [key, list] of this.buckets) {
-      const def = mats[key];
-      if (!def) throw new Error(`structures: no material '${key}'`);
-      const g = mergeGeometries(list, false);
-      for (const x of list) x.dispose();
-      g.computeBoundingSphere(); g.computeBoundingBox();
-      const mesh = new THREE.Mesh(g, def.material);
-      mesh.name = `structures:${key}`;
-      mesh.castShadow = def.cast !== false;
-      mesh.receiveShadow = def.receive !== false;
-      mesh.matrixAutoUpdate = false; mesh.updateMatrix();
-      group.add(mesh);
-      mesh.userData.kind = 'context';
-      meshes[key] = mesh;
+  // Assemble each stage off scene, then publish it atomically. Existing material
+  // meshes absorb the new pieces so five loading stages still cost one draw per finish.
+  *publish(mats,group,meshes) {
+    const changes=[];
+    for(const [key,parts] of this.buckets){
+      const def=mats[key],existing=meshes.get(key);
+      if(!def)throw new Error(`structures: no material '${key}'`);
+      if(existing)parts.unshift(existing.geometry);
+      const vertexCount=parts.reduce((n,g)=>n+g.attributes.position.count,0);
+      const indexCount=parts.reduce((n,g)=>n+g.index.count,0);
+      const indices=vertexCount>=65535?new Uint32Array(indexCount):new Uint16Array(indexCount);
+      const geo=new THREE.BufferGeometry();
+      for(const [name,attr] of Object.entries(parts[0].attributes)){
+        geo.setAttribute(name,new THREE.BufferAttribute(new attr.array.constructor(vertexCount*attr.itemSize),attr.itemSize,attr.normalized));
+      }
+      let vertex=0,index=0;
+      for(let i=0;i<parts.length;i++){
+        const part=parts[i];
+        for(const [name,target] of Object.entries(geo.attributes)){
+          target.array.set(part.attributes[name].array,vertex*target.itemSize);
+        }
+        if(!vertex)indices.set(part.index.array);
+        else for(let k=0;k<part.index.count;k++)indices[index+k]=part.index.array[k]+vertex;
+        index+=part.index.count;vertex+=part.attributes.position.count;
+        if(part!==existing?.geometry){part.dispose();parts[i]=null;}
+        if(i%64===0)yield;
+      }
+      geo.setIndex(new THREE.BufferAttribute(indices,1));geo.computeBoundingSphere();
+      changes.push({key,geo,existing,def});
+      yield;
     }
-    return meshes;
+    this.buckets.clear();
+    for(const {key,geo,existing,def} of changes){
+      if(existing){existing.geometry.dispose();existing.geometry=geo;continue;}
+      const mesh=new THREE.Mesh(geo,def.material);
+      mesh.name=`structures:${key}`;mesh.castShadow=def.cast!==false;
+      mesh.receiveShadow=def.receive!==false;mesh.matrixAutoUpdate=false;mesh.updateMatrix();
+      mesh.userData.kind='context';meshes.set(key,mesh);group.add(mesh);
+    }
   }
 }
 
@@ -64,10 +88,29 @@ export class Batch {
 // ---------------------------------------------------------------------------
 
 /** Plan-aligned box: w along plan x (before rot), d along plan y, h up, base at z0. rot = plan angle (rad, CCW from east). */
-export function boxAt(cx, cy, z0, w, d, h, rot = 0) {
-  const g = new THREE.BoxGeometry(w, h, d);
-  if (rot) g.rotateY(rot);
-  g.translate(cx, z0 + h / 2, -cy);
+const unitBox=new THREE.BoxGeometry(1,1,1);
+export function boxAt(cx,cy,z0,w,d,h,rot=0,metricUV=false) {
+  // All rectangular trim uses the same 24 corners, face normals and index.
+  // Transform once and write the metric UVs while the position is still in registers.
+  const src=unitBox.attributes.position.array,normal=unitBox.attributes.normal.array;
+  const pos=new Float32Array(src.length),nor=new Float32Array(src.length);
+  const uv=metricUV?new Float32Array(48):null;
+  const c=Math.cos(rot),s=Math.sin(rot);
+  for(let i=0,j=0;i<src.length;i+=3,j+=2){
+    const x=src[i]*w,z=src[i+2]*d;
+    pos[i]=cx+c*x+s*z;pos[i+1]=z0+h*(src[i+1]+.5);pos[i+2]=-cy-s*x+c*z;
+    nor[i]=c*normal[i]+s*normal[i+2];nor[i+1]=normal[i+1];nor[i+2]=-s*normal[i]+c*normal[i+2];
+    if(uv){
+      const top=normal[i+1]!==0;
+      uv[j]=top || Math.abs(nor[i])<Math.abs(nor[i+2])?pos[i]:pos[i+2];
+      uv[j+1]=top?pos[i+2]:pos[i+1];
+    }
+  }
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position',new THREE.BufferAttribute(pos,3));
+  g.setAttribute('normal',new THREE.BufferAttribute(nor,3));
+  g.setAttribute('uv',uv?new THREE.BufferAttribute(uv,2):unitBox.attributes.uv);
+  g.setIndex(unitBox.index);
   return g;
 }
 

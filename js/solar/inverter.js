@@ -1,12 +1,13 @@
+import {runInSlices} from './schedule.js';
 import * as THREE from 'three';
 import {stationRack,rackChannel} from './bos-route.js';
-import {Batch,material,powderFinish,labelSheet,plate} from './bos-mesh.js';
+import {Batch,material,powderFinish,labelSheet,sharePlateMap,plate} from './bos-mesh.js';
 
 const ZINC=0xa4acae, EDGE=0xc5ccc9, SHADOW=0x435054, RUBBER=0x252a2c;
 const SHELL=0xd9dcd6, PORCELAIN=0xe4e6df, SIGNAL=0xac3024;
 
 // Equipment envelope, fastenings and support dimensions are assumed generic utility string inverters.
-function inverter(b,x,inv,low){
+function* inverter(b,x,inv,low){
   const {metal,paint,labels}=b;
   const bottom=1.03, mid=1.38,front=.493;
   for(const z of [1.14,1.58])metal.box(x,.089,z,.96,.09,.048,ZINC);
@@ -35,14 +36,15 @@ function inverter(b,x,inv,low){
       const xx=x-.16+sign*.17;
       metal.rod([xx,.509,1.521],[xx,.514,1.521],.0075,0x929c94,6,.0075,true,false);
     }
-    plate(labels,12,x+.252,front+.036,mid+.098,.135,.042);
-    plate(labels,7,x-.344,front+.002,1.127,.194,.072);
-    plate(labels,7+Number(inv.id.split('-')[1]),x+.282,front+.002,1.586,.258,.084);
-    plate(labels,0,x-.35,front+.002,1.204,.124,.043);
   }
+  plate(labels,12,x+.252,front+.036,mid+.098,.135,.042);
+  plate(labels,7,x-.344,front+.002,1.127,.194,.072);
+  plate(labels,7+Number(inv.id.split('-')[1]),x+.282,front+.002,1.586,.258,.084);
+  plate(labels,0,x-.35,front+.002,1.204,.124,.043);
   paint.box(x,.306,bottom-.011,.89,.20,.026,0x525b58);
   const inputs=low?3:inv.strings,sideCount=low?4:8;
   for(let i=0;i<inputs;i++){
+    if (!(i%3)) yield;
     const xx=x+.16+i*.030-.27;
     for(let row=0;row<(low?1:2);row++){
       const yy=.307+row*.052;
@@ -77,7 +79,7 @@ function acdb(b,x,low){
     paint.rod([xx,.417,1.46],[xx,.434,1.46],.025,SHADOW,low?4:12,.025,true);
     paint.rod([xx,.433,1.46],[xx,.447,1.46],.017,[0x9e3530,0xd5a33f,0x427c91][i],low?4:12,.015,true);
   }
-  if(!low){plate(labels,2,x,.423,1.624,.39,.108);plate(labels,0,x+.05,.423,1.06,.26,.085);}
+  plate(labels,2,x,.423,1.624,.39,.108);plate(labels,0,x+.05,.423,1.06,.26,.085);
   metal.box(x,.21,.484,.17,.08,.56,ZINC);
   for(let k=0;k<3;k++){
     const xx=x+(k-1)*.052;
@@ -99,9 +101,10 @@ function extinguisher(b,x,y,z,low){
   metal.rod([x-.015,y+.013,z+.240],[x-.015,y+.041,z+.240],.022,EDGE,10,.022,true);
   paint.rod([x-.015,y+.040,z+.240],[x-.015,y+.044,z+.240],.018,0xe9e8d4,10,.018,true);
   paint.path([[x-.021,y,z+.241],[x-.080,y,z+.24],[x-.119,y,z+.185],[x-.127,y+.012,z+.08],[x-.102,y+.06,z-.14]],.009,RUBBER,7);
-  if(!low)plate(labels,4,x,y+.096,z+.04,.123,.05);
+  plate(labels,4,x,y+.096,z+.04,.123,.05);
 }
-function station(ctx,s,b,low){
+function* station(ctx,s,b,low){
+  yield;
   for(const batch of Object.values(b))batch.setFrame(s.x,s.y,s.z,s.normal);
   const {metal,paint,shade,labels,mat}=b;
   const rack=stationRack(ctx.site,s);
@@ -159,6 +162,7 @@ function station(ctx,s,b,low){
       mat.face([[left,y+pitch*.23,.005],[right,y+pitch*.23,.005],[right,y+pitch*.66,.0038],[left,y+pitch*.66,.0038]],0x444844);
     }
   }
+  yield;
   const sx=west,ex=east;
   const prof=[[sx,0]], pitches=Math.ceil((ex-sx)/(low ? .45 : .205)),pitch=(ex-sx)/pitches;
   for(let i=0;i<pitches;i++)for(const [f,h] of [[.14,0],[.21,.025],[.38,.025],[.45,0],[1,0]])prof.push([sx+(i+f)*pitch,h]);
@@ -183,20 +187,25 @@ function station(ctx,s,b,low){
       shade.box(side+.035,(v0+v1)/2,z-.026,.01,v1-v0,.024,0x8d9693);
     }
   }
-  for(let j=0;j<xs.length;j++)inverter(b,xs[j],ctx.site.INVERTERS.find(i=>i.id===s.inverters[j]),low);
+  for(let j=0;j<xs.length;j++){
+    yield;
+    yield* inverter(b,xs[j],ctx.site.INVERTERS.find(i=>i.id===s.inverters[j]),low);
+  }
+  yield;
   acdb(b,cabinet,low);
   const logger=xs[0]+.27, lz=1.98;
   paint.housing(logger,.115,lz,.292,.145,.176,.038,SHELL,low?1:3);
   paint.rod([logger-.108,.12,2.062],[logger-.108,.12,2.208],.007,SHADOW,7,.005,true);
   paint.rod([logger+.113,.19,lz-.023],[logger+.113,.195,lz-.023],.006,0x6db78b,7,.006,true);
-  if(!low)plate(labels,6,logger+.005,.190,lz,.188,.061);
+  plate(labels,6,logger+.005,.190,lz,.188,.061);
   metal.path([[logger,.122,1.91],[logger,.122,1.86],[logger+.08,.09,1.82],[logger+.08,.09,1.60]],.009,ZINC,6);
   const signX=xs.at(-1)-.29;
   metal.box(signX,.036,1.998,.33,.072,.072,SHADOW);
   metal.box(signX,.075,1.998,.46,.023,.158,ZINC);
-  if(!low)plate(labels,0,signX,.088,1.998,.451,.150);
+  plate(labels,0,signX,.088,1.998,.451,.150);
   metal.box(fire,.105,.81,.062,.21,.075,ZINC);
   metal.box(fire,.029,.81,.12,.058,.16,EDGE);
+  yield;
   extinguisher(b,fire,.294,.71,low);
   for(const ac of [false,true]){
     const points=rackChannel(rack,west+.04,east-.04,ac);
@@ -207,19 +216,26 @@ function station(ctx,s,b,low){
     }
   }
 }
-export function buildInverterStations(ctx){
+export async function buildInverterStations(ctx){
+  return runInSlices(ctx,stationSteps(ctx));
+}
+function* stationSteps(ctx){
   const group=new THREE.Group();group.name='Rooftop inverter stations';
   const b={body:new Batch(),metal:new Batch(),paint:new Batch(),shade:new Batch(),labels:new Batch(),mat:new Batch()},low=ctx.quality==='low';
-  for(const s of ctx.site.INVERTER_STATIONS)station(ctx,s,b,low);
+  const rubber=material('Ribbed insulating rubber',.94,.015);
+  if (low) { b.labels=b.mat; sharePlateMap(ctx,b.mat,rubber); }
+  for(const s of ctx.site.INVERTER_STATIONS)yield* station(ctx,s,b,low);
+  yield;
   const steel=material('Hot dip galvanised frame',.57,.57);
   b.metal.mesh(group,'Station strut frames, glands and base plates',steel);
   b.shade.mesh(group,'Folded canopy, shade louvres and brackets',steel,true,ctx);
-  const rubber=material('Ribbed insulating rubber',.94,.015);
   b.mat.mesh(group,'Terrace insulating mats',rubber);
   const finish=powderFinish(ctx);
+  yield;
   b.body.mesh(group,'Die-cast inverter housings and ACDBs',finish,true,ctx);
   b.paint.mesh(group,'Station instruments, cable glands and fittings',finish);
-  if(!low)b.labels.mesh(group,'Engraved nameplates and safety labels',labelSheet(ctx.quality,ctx.maxAnisotropy,ctx.site.INVERTERS));
+  yield;
+  if(!low)b.labels.mesh(group,'Engraved nameplates and safety labels',labelSheet(ctx));
   group.userData.stations=ctx.site.INVERTER_STATIONS.map(s=>({id:s.id,inverters:s.inverters,obstacle:s.obstacle}));
   return {group};
 }

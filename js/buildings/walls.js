@@ -84,10 +84,10 @@ function apartmentEdge(K,e,seed) {
       }
       else {
         if(roomy && key%5!==1) box(K.walls,f,c-ww/2-.14,c+ww/2+.14,top+.055,top+.145,.002,accent ? .26:.41,facade.band);
-        if(!K.low && roomy && (key+floor*3)%7===0) condenser(K,f,c+.13,z+.20);
+        if(!K.low && roomy && (key+floor*3)%7===0) K.later.push(D=>condenser(D,f,c+.13,z+.20));
         if(!K.low && !accent && (key+floor)%3===0) {
           const left=c-ww/2;
-          panel(K.stains,f,left-.02,left+.34,bottom-.49,bottom-.04,.004,'#ddd7c7',fullUV);
+          K.later.push(D=>{D.stains.skyAccess=.72;panel(D.stains,f,left-.02,left+.34,bottom-.49,bottom-.04,.004,'#ddd7c7',fullUV);});
         }
         if(accent && !K.low) {
           // Open tile joints continue across the two jambs of the feature strip.
@@ -101,7 +101,7 @@ function apartmentEdge(K,e,seed) {
 }
 function shaftEdge(K,e,index) {
   const {f,len}=e, B=K.building;
-  panel(K.walls,f,0,len,0,B.roofZ,0,'#b0a99b');
+
   if(len<2.5) return;
   // assumed pipes and frosted awning lights are concentrated in wet-service bays
   const n=Math.max(1,Math.floor(len/4.4));
@@ -117,21 +117,34 @@ function shaftEdge(K,e,index) {
         face(K.details,f,[[x-.286,h+dy,.061+opening],[x+.286,h+dy,.061+opening],[x+.286,h+dy+.163,.061],[x-.286,h+dy+.163,.061]],awning?'#83938b':'#a6aaa0');
         box(K.details,f,x-.296,x+.296,h+dy-.012,h+dy+.008,.058+opening,.078+opening,'#68726d');
       }
-      if(!K.low && (fl+index)%3!==1)panel(K.stains,f,x-.42,x+.42,h-.89,h-.01,.004,'#dfd8c7',fullUV);
+      if(!K.low && (fl+index)%3!==1){
+        const access=K.stains.skyAccess;
+        K.later.push(D=>{
+          D.stains.skyAccess=access;
+          panel(D.stains,f,x-.42,x+.42,h-.89,h-.01,.004,'#dfd8c7',fullUV);
+        });
+      }
       if(!K.low)box(K.walls,f,x-.39,x+.39,h-.048,h,.014,.14,shade);
     }
   }
-  if(index%3===0 || len>7) {
-    const x=Math.min(.48,len*.15);
-    for(const [offset,r,col] of [[0,.063,'#a09f93'],[.23,.045,'#c4c2af']]) {
-      tube(K.details,pt(f,x+offset,.12,.135),pt(f,x+offset,B.roofZ-.12,.135),r,col,8);
-      for(let fl=1;fl<B.floors;fl++) {
-        const h=fl*B.floorHeight-.34;
-        box(K.details,f,x+offset-r*1.19,x+offset+r*1.19,h,h+.055,.025,.135+r,'#75796e');
-        if(!K.low && offset===0) tube(K.details,pt(f,x+.36,h+.38,.135),pt(f,x,h+.11,.135),.042,col,7);
-      }
+  if(index%3===0 || len>7){
+    const access=K.details.skyAccess;
+    K.later.push(D=>shaftPipes(D,e,access));
+  }
+}
+function shaftPipes(K,e,access){
+  const {f,len}=e,B=K.building;
+  K.details.skyAccess=access;
+  const x=Math.min(.48,len*.15);
+  for(const [offset,r,col] of [[0,.063,'#a09f93'],[.23,.045,'#c4c2af']]) {
+    tube(K.details,pt(f,x+offset,.12,.135),pt(f,x+offset,B.roofZ-.12,.135),r,col,8);
+    for(let fl=1;fl<B.floors;fl++) {
+      const h=fl*B.floorHeight-.34;
+      box(K.details,f,x+offset-r*1.19,x+offset+r*1.19,h,h+.055,.025,.135+r,'#75796e');
+      if(!K.low && offset===0) tube(K.details,pt(f,x+.36,h+.38,.135),pt(f,x,h+.11,.135),.042,col,7);
     }
   }
+  K.details.skyAccess=.77;
 }
 function parking(K,p) {
   const {site,building:B}=K,F=globalFrame;
@@ -169,13 +182,35 @@ export function buildFacades(K,rings) {
   const surfaceAccess=K.walls.skyAccess, trimAccess=K.details.skyAccess;
   // Parking columns and cores receive progressively less skylight away from open edges.
   const exterior=rings.filter(r=>!r.hole).flatMap(r=>r.es);
-  const stiltAccess=(x,y,z,n)=>{
-    let depth=12;
-    for(const {a,f,len} of exterior){
-      const dx=x-a[0],dy=y-a[1],t=Math.max(0,Math.min(len,dx*f.x[0]+dy*f.x[1]));
-      depth=Math.min(depth,Math.hypot(dx-t*f.x[0],dy-t*f.x[1]));
+  // Only edges within the original 12 m depth cap can affect a column. Index their
+  // expanded bounds once and reuse the exact distance for all vertices at the same XY.
+  const cells=new Map(), depths=new Map(), radius=12;
+  const cellKey=(x,y)=>x+','+y;
+  for(const edge of exterior){
+    const {a,b}=edge;
+    for(let i=Math.floor(Math.min(a[0],b[0])/radius)-1;i<=Math.floor(Math.max(a[0],b[0])/radius)+1;i++){
+      for(let j=Math.floor(Math.min(a[1],b[1])/radius)-1;j<=Math.floor(Math.max(a[1],b[1])/radius)+1;j++){
+        const key=cellKey(i,j);
+        if(!cells.has(key))cells.set(key,[]);
+        cells.get(key).push(edge);
+      }
     }
-    return (n[2]<-.5 ? .44:.88)*(.14+.68*Math.exp(-depth/2.8));
+  }
+  const stiltAccess=(x,y,z,n)=>{
+    const key=cellKey(x,y);
+    let access=depths.get(key);
+    if(access===undefined){
+      let squared=radius*radius;
+      const nearby=cells.get(cellKey(Math.floor(x/radius),Math.floor(y/radius)));
+      if(nearby)for(const {a,f,len} of nearby){
+        const dx=x-a[0],dy=y-a[1],t=Math.max(0,Math.min(len,dx*f.x[0]+dy*f.x[1]));
+        const ex=dx-t*f.x[0],ey=dy-t*f.x[1];
+        squared=Math.min(squared,ex*ex+ey*ey);
+      }
+      access=.14+.68*Math.exp(-Math.sqrt(squared)/2.8);
+      depths.set(key,access);
+    }
+    return (n[2]<-.5 ? .44:.88)*access;
   };
   K.walls.skyAccess=K.details.skyAccess=stiltAccess;
   for(const p of K.site.ROOF.polygons) {
@@ -190,7 +225,10 @@ export function buildFacades(K,rings) {
     K.details.skyAccess=hole?shaftAccess:trimAccess;
     K.stains.skyAccess=hole?shaftAccess:.72;
     for(const [i,e] of es.entries()) {
-      if(hole) shaftEdge(K,e,i);
+      if(hole){
+        panel(K.walls,e.f,0,e.len,0,K.building.roofZ,0,'#b0a99b');
+        shaftEdge(K,e,i);
+      }
       else apartmentEdge(K,e,i+Math.round(Math.abs(e.a[0])*3));
       panel(K.mass,e.f,0,e.len,hole?0:K.building.stiltHeight,K.building.roofZ,0,'#ffffff');
     }

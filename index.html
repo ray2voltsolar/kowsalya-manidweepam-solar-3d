@@ -37,6 +37,7 @@
     <svg viewBox="0 0 24 24" class="ic"><path d="m9 6 6 6-6 6"/></svg></button>
   <div class="br-text">
     <div class="br-eyebrow" id="brSystem"></div>
+    <div class="phone-system" id="phoneSystem"></div>
     <h1 class="br-title" id="brCustomer"></h1>
     <div class="br-sub" id="brLocation"></div>
   </div>
@@ -54,7 +55,7 @@
 
 <!-- Side panel / bottom sheet -->
 <aside id="panel" class="glass" aria-label="Controls">
-  <div class="sheet-grip" id="sheetGrip" aria-hidden="true"><i></i></div>
+  <button type="button" class="sheet-grip" id="sheetGrip" aria-expanded="false" aria-controls="panelBody"><i></i><span id="sheetHeadline"></span></button>
   <nav class="tabs" role="tablist">
     <button role="tab" data-tab="summary" class="active" title="System summary">
       <svg viewBox="0 0 24 24" class="ic"><rect x="3.5" y="3.5" width="17" height="17" rx="3"/><path d="M8 16v-4M12 16V8M16 16v-6"/></svg><span>Summary</span></button>
@@ -86,7 +87,7 @@
 <button id="bottomOpen" class="glass chip-open" title="Show controls" aria-label="Show controls">
   <svg viewBox="0 0 24 24" class="ic"><path d="m6 15 6-6 6 6"/></svg><span>Controls</span></button>
 
-<div id="compass" class="glass"></div>
+<button id="compass" class="glass" aria-label="Compass — click for plan view (north up)"></button>
 <div id="scalebar" class="glass"></div>
 <div id="legendFloat" class="glass" hidden></div>
 <div id="tooltip" role="tooltip" hidden></div>
@@ -94,6 +95,11 @@
 <div id="measureHint" class="glass" hidden></div>
 <div id="toasts" aria-live="polite"></div>
 <footer id="attrib"></footer>
+<div id="gestureHint" role="status" hidden></div>
+<dialog id="contextLost" aria-labelledby="contextLostMessage">
+  <div><p id="contextLostMessage">The 3D view was paused by the browser to free memory.</p>
+  <button type="button" class="btn primary" id="reload3d">Reload 3D view</button></div>
+</dialog>
 
 <script type="module" src="js/main.js"></script>
 </body>

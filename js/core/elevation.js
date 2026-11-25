@@ -23,7 +23,7 @@ function paving(renderer, size) {
   map.colorSpace = THREE.SRGBColorSpace;
   map.wrapS = map.wrapT = THREE.RepeatWrapping;
   map.repeat.set(600,600);
-  map.anisotropy = Math.min(8,renderer.capabilities.getMaxAnisotropy());
+  map.anisotropy = Math.min(16,renderer.capabilities.getMaxAnisotropy());
   return map;
 }
 
@@ -35,33 +35,33 @@ export function createElevationBackdrop(renderer, scene, lighting) {
   const sun = new THREE.DirectionalLight(), fill = new THREE.HemisphereLight();
   plate.add(dome,sun,sun.target,fill);
   const direction = new THREE.Vector3(), grade = new THREE.Vector3();
-  let floor, target, key = '';
+  let floor, target, lastView, lastTime, lastQuality, lastLighting;
+  const position = new THREE.Vector3(), projection = new THREE.Matrix4();
 
   function clear() {
-    if (!key) return;
+    if (!target) return;
     lighting.sky.visible = true;
     scene.background = null;
     target.dispose();
     target = null;
-    key = '';
   }
 
   function update(rig, time, quality) {
     const ortho = rig.camera, canvas = renderer.domElement;
-    const maxWidth = quality === 'low' ? 960 : quality === 'medium' ? 1440 : canvas.width;
-    const scale = Math.min(1, maxWidth/canvas.width);
-    const width = Math.round(canvas.width*scale), height = Math.max(1, Math.round(canvas.height*scale));
-    const next = [rig.currentView, ortho.zoom, ortho.position.toArray(), ortho.projectionMatrix.elements,
-      width, height, time, quality].join('|');
-    if (key === next) return;
-    key = next;
+    const scale = quality === 'low' ? Math.min(1, 2048 / Math.max(canvas.width, canvas.height)) : 1;
+    const width = Math.max(1, Math.round(canvas.width*scale)), height = Math.max(1, Math.round(canvas.height*scale));
+    if (target?.width === width && target.height === height && lastView === rig.currentView &&
+        lastTime === time && lastQuality === quality && lastLighting === lighting.revision &&
+        position.equals(ortho.position) && projection.equals(ortho.projectionMatrix)) return;
+    lastView = rig.currentView; lastTime = time; lastQuality = quality; lastLighting = lighting.revision;
+    position.copy(ortho.position); projection.copy(ortho.projectionMatrix);
     if (!floor) {
-      const map = paving(renderer, quality === 'low' ? 256 : 512);
+      const map = paving(renderer, 512);
       floor = new THREE.Mesh(new THREE.PlaneGeometry(3200,3200), new THREE.MeshStandardMaterial({map, roughness:.98}));
       floor.rotation.set(-Math.PI/2, 0, .14);
       plate.add(floor);
     }
-    target ??= new THREE.WebGLRenderTarget(width,height,{type:THREE.HalfFloatType});
+    target ??= new THREE.WebGLRenderTarget(width,height,{type:lighting.hdr ? THREE.HalfFloatType : THREE.UnsignedByteType});
     target.setSize(width,height);
     ortho.getWorldDirection(direction).setY(0).normalize();
     grade.copy(rig.controls.target).setY(0);

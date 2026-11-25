@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { boxAt, revolve, placeAt } from './kit.js';
 import { box, pipe, edgeBar, edges, mix, quad, slab, rect } from './geometry.js';
-import { buildPool } from './pool.js';
+
 
 // assumed throughout: façade bays, court positions, storey detailing and terrace utilities.
 // Retain the traced perimeter for the balconies, plinth and roof edge.
@@ -19,9 +19,9 @@ function wall(a,b,z0,z1,u0,u1,v0,v1){
 }
 function parallelPoint(a,tx,ty,s,depth){return [a[0]+tx*s+ty*depth,a[1]+ty*s-tx*depth];}
 
-function elevations(B,site,r,z0,h,colour,id,club,commercial,low) {
+function* elevations(B,site,r,z0,h,colour,id,club,commercial,low) {
   const ring=site.ringArea(r)>0?r:r.slice().reverse(), floors=Math.round((h-z0)/site.BUILDING.floorHeight);
-  edges(ring).forEach(([a,b],face)=>{
+  for(const [face,[a,b]] of edges(ring).entries()){
     const L=Math.hypot(b[0]-a[0],b[1]-a[1]),tx=(b[0]-a[0])/L,ty=(b[1]-a[1])/L,rot=Math.atan2(ty,tx);
     const n=Math.max(2,Math.round(L/(club?3.7:3.5))),w=L/n;
     const at=(s,d)=>parallelPoint(a,tx,ty,s,d);
@@ -29,6 +29,7 @@ function elevations(B,site,r,z0,h,colour,id,club,commercial,low) {
     const phase=(id+face)/8;
     B.add('facade',wall(a,b,z0,h,phase,phase+n/8,0,floors/4),colour);
     for(let f=0;f<=floors;f++){
+      yield;
       const z=z0+f*(h-z0)/floors;
       strip('render',trim,L/2,.10,L+.15,.27,z-.17,.17);
       if(f===floors)break;
@@ -61,7 +62,7 @@ function elevations(B,site,r,z0,h,colour,id,club,commercial,low) {
       strip('render',colour,(i+.5)*w,.01,.43,.49,.08,z0-.12);
       if(commercial||club) strip('metal','#767873',i*w,-1.88,.075,.11,.12,z0-.12);
     }
-  });
+  }
 }
 
 function tank(B,proxy,x,y,z,r,low) {
@@ -83,14 +84,15 @@ function services(B,proxy,r,z,u,v,rot,low,twins){
   if(twins)tank(B,proxy,...pos(-1.08,.1),z+h+.16,.78,low);
 }
 
-export function buildNeighbours(ctx,B,group) {
+export function* buildNeighbours(ctx,B,group) {
   const {site}=ctx, low=ctx.quality==='low';
+  let clubDeck;
   const proxyMaterial=new THREE.MeshBasicMaterial();
   for(const [id,building] of site.NEIGHBOURS.entries()){
     const {polygon:r,h,kind}=building,club=building.id===site.COMPOUND.pool.onRoofOf,commercial=kind==='commercial';
     const colour=finishes[id%finishes.length],proxy=[],rInner=shrink(r,club?.32:.89);
     const rot=Math.atan2(r[1][1]-r[0][1],r[1][0]-r[0][0]);
-    elevations(B,site,rInner,site.BUILDING.stiltHeight,h,colour,id,club,commercial,low);
+    yield* elevations(B,site,rInner,site.BUILDING.stiltHeight,h,colour,id,club,commercial,low);
     const roofHoles=club?[]:commercial?[court(r,.26,.28,.69,.62)]:[court(r,.30,.22,.61,.40),court(r,.40,.59,.66,.76)];
     const pool=site.COMPOUND.pool;
     if(club)roofHoles.push(rect(pool.x0,pool.y0,pool.x1,pool.y1));
@@ -107,8 +109,7 @@ export function buildNeighbours(ctx,B,group) {
       edgeBar(B,'render',colour,a,b,h,.19,club?.35:.76);
       edgeBar(B,'paving','#eee8d9',a,b,h+(club?.35:.76),.26,.075);
     }
-    if(club)buildPool(ctx,B,r,h,proxy);
-    else {
+    if(!club){
       for(const hole of roofHoles){
         const inner=site.ringArea(hole)<0?hole:hole.slice().reverse();
         for(const [a,b] of edges(inner)){
@@ -134,10 +135,16 @@ export function buildNeighbours(ctx,B,group) {
     const outer=site.ringArea(r)>0?r:r.slice().reverse();
     for(const [a,b] of edges(outer))proxy.push(wall(a,b,0,h+(club?.43:.84),0,1,0,1));
     proxy.push(slab(outer,[],h));
-    const g=mergeGeometries(proxy,false),m=new THREE.Mesh(g,proxyMaterial);
-    proxy.forEach(part=>part.dispose());
-    m.name='structures:neighbour:'+building.id;m.visible=false;
-    Object.assign(m.userData,{kind,siteId:building.id,occluderCategory:'neighbours',occluderCount:1});
-    group.add(m);ctx.registerOccluder(m);
+    function register(){
+      const g=mergeGeometries(proxy,false),m=new THREE.Mesh(g,proxyMaterial);
+      proxy.forEach(part=>part.dispose());
+      m.name='structures:neighbour:'+building.id;m.visible=false;
+      Object.assign(m.userData,{kind,siteId:building.id,occluderCategory:'neighbours',occluderCount:1});
+      group.add(m);ctx.registerOccluder(m);
+    }
+    if(club)clubDeck={outline:r,z:h,proxy,register};
+    else register();
+    yield;
   }
+  return clubDeck;
 }

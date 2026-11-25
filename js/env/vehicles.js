@@ -1,4 +1,5 @@
-import { GeoBuilder, makeCanvas, completeMips } from './util.js';
+import { cachedGeometry, packedTexture } from './procedural-cache.js';
+import { GeoBuilder, makeCanvas, canvasTexture } from './util.js';
 import { roadAt, vehicles } from './layout.js';
 class Kit {
   constructor(THREE, low) { this.low=low;
@@ -21,10 +22,18 @@ class Kit {
     const W = new T.Matrix4().multiplyMatrices(this.M, L);
     const NW = new T.Matrix3().getNormalMatrix(W);
     const v = this._v, n = this._n;
-    this.gb[mat].addGeometry(geo, (p, nn) => {
-      v.set(p[0], p[1], p[2]).applyMatrix4(W); n.set(nn[0], nn[1], nn[2]).applyMatrix3(NW).normalize();
-      return [[v.x, v.y, v.z], [n.x, n.y, n.z]];
-    }, color);
+    const part=this.gb[mat], base=part.count;
+    const {position,normal,uv}=geo.attributes;
+    for(let i=0;i<position.count;i++){
+      v.fromBufferAttribute(position,i).applyMatrix4(W);
+      n.fromBufferAttribute(normal,i).applyMatrix3(NW).normalize();
+      part.p.push(v.x,v.y,v.z);part.n.push(n.x,n.y,n.z);
+      part.uv.push(uv?.getX(i) ?? 0,uv?.getY(i) ?? 0);
+      const tint=typeof color==='function'?color([v.x,v.y,v.z]):color;
+      part.c.push(tint[0],tint[1],tint[2]);
+    }
+    if(geo.index) for(const index of geo.index.array) part.i.push(base+index);
+    else for(let i=0;i<position.count;i++) part.i.push(base+i);
     geo.dispose();
   }
   box(mat, color, cx, cy, cz, sx, sy, sz, rx = 0, ry = 0, rz = 0) {
@@ -447,8 +456,11 @@ function fixedParts(kit) {
     const part=kit.gb[name], first=merged.count;
     // Avoid large spreads for the merged motorcycle geometry on mobile browsers.
     for(let i=0;i<part.count;i++){
-      const j=i*3, c=tint.map((v,ch)=>v*part.c[j+ch]);
-      merged.vert(part.p.slice(j,j+3),part.n.slice(j,j+3),part.uv.slice(i*2,i*2+2),c);
+      const j=i*3, uv=i*2;
+      merged.p.push(part.p[j],part.p[j+1],part.p[j+2]);
+      merged.n.push(part.n[j],part.n[j+1],part.n[j+2]);
+      merged.uv.push(part.uv[uv],part.uv[uv+1]);
+      merged.c.push(tint[0]*part.c[j],tint[1]*part.c[j+1],tint[2]*part.c[j+2]);
       finishes.push(roughness,metalness);
     }
     for(const index of part.i)merged.i.push(first+index);
@@ -458,14 +470,16 @@ function fixedParts(kit) {
   return geo;
 }
 
-function registrationPlates(THREE,cars) {
-  const rowH=36,canvas=makeCanvas(160,rowH*cars.length),g=canvas.getContext('2d');
+function registrationPlates(THREE,cars,atlas) {
+  const rowH=36,canvas=atlas?null:makeCanvas(160,rowH*cars.length),g=canvas?.getContext('2d',{willReadFrequently:true});
   const gb=new GeoBuilder(),pose=new THREE.Object3D(),point=new THREE.Vector3();
   const series=['KC','GA','FA','HD','JT','BL','GD','EK']; // assumed, illustrative registrations
-  g.textAlign='center';g.textBaseline='middle';g.font='bold 23px Arial';
+  if(g){g.textAlign='center';g.textBaseline='middle';g.font='bold 23px Arial';}
   cars.forEach(({x,y,angle,road},i)=>{
-    g.fillStyle='#dddcd0';g.fillRect(0,i*rowH,canvas.width,rowH);
-    g.fillStyle='#373833';g.fillText('TS 08 '+series[i%series.length]+' '+(3247+(i*793)%6320),80,(i+.52)*rowH,149);
+    if(g){
+      g.fillStyle='#dddcd0';g.fillRect(0,i*rowH,canvas.width,rowH);
+      g.fillStyle='#373833';g.fillText('TS 08 '+series[i%series.length]+' '+(3247+(i*793)%6320),80,(i+.52)*rowH,149);
+    }
     pose.position.set(x,road?.024:.002,-y);pose.rotation.y=(90-angle)*Math.PI/180;
     pose.translateX(-1.97);pose.updateMatrix();
     for(const [cx,cy,sign] of [[4.034,.539,1],[-.076,.651,-1]]){
@@ -477,12 +491,12 @@ function registrationPlates(THREE,cars) {
       gb.quad(...corners);
     }
   });
-  const map=new THREE.CanvasTexture(canvas);map.colorSpace=THREE.SRGBColorSpace;completeMips(map);
+  const map=atlas?packedTexture(THREE,atlas,true):canvasTexture(THREE,canvas);map.colorSpace=THREE.SRGBColorSpace;
   const mesh=new THREE.Mesh(gb.build(THREE),new THREE.MeshStandardMaterial({map,roughness:.43}));
   mesh.name='Vehicle registration plates';mesh.receiveShadow=true;return mesh;
 }
 
-export function buildVehicles(ctx,parent) {
+export async function buildVehicles(ctx,parent,pack=null) {
   const {THREE,site}=ctx,low=ctx.quality==='low';
   const locations=vehicles(site),contacts=[];
   const paints=[0xe9e7de,0xb9bebd,0xd9dbd9,0x535a5c,0xebe8da,0x843c35,0x35465b,0xc4c7c4];
@@ -495,18 +509,24 @@ export function buildVehicles(ctx,parent) {
   const cars=locations.cars.map(([x,y,angle],i)=>({
     x,y,angle,suv:i%3===1,color:paints[i%paints.length],road:Math.abs(x-roadAt(site,y))<site.ROAD.width/2
   })).filter((_,i)=>!low || i%4!==2);
-  if(cars.length)parent.add(registrationPlates(THREE,cars));
+  if(cars.length)parent.add(registrationPlates(THREE,cars,pack?.plateAtlas));
   for(const suv of [false,true]){
     const sites=cars.filter(c=>c.suv===suv);
     if(!sites.length)continue;
-    const k=new Kit(THREE,low);
-    car(k,suv);
-    const body=new THREE.InstancedMesh(k.gb.paint.build(THREE,{color:true}),paint,sites.length);
-    const trim=new THREE.InstancedMesh(fixedParts(k),finish,sites.length);
-    const windows=new THREE.InstancedMesh(k.gb.glass.build(THREE,{color:true}),glazing,sites.length);
-    body.name=(suv?'Compact SUV':'Hatchback')+' - clear-coated bodywork';
-    trim.name=(suv?'Compact SUV':'Hatchback')+' - trim and wheels';
-    windows.name=(suv?'Compact SUV':'Hatchback')+' - smoked glazing';
+    await ctx.breathe();
+    const model=suv?'Compact SUV':'Hatchback';
+    const names=['clear-coated bodywork','trim and wheels','smoked glazing'].map(s=>model+' - '+s);
+    let geometries;
+    if(pack) geometries=names.map(name=>cachedGeometry(THREE,pack,name));
+    else {
+      const kit=new Kit(THREE,low);
+      car(kit,suv);
+      geometries=[kit.gb.paint.build(THREE,{color:true}),fixedParts(kit),kit.gb.glass.build(THREE,{color:true})];
+    }
+    const [body,trim,windows]=[paint,finish,glazing].map((mat,i)=>{
+      const mesh=new THREE.InstancedMesh(geometries[i],mat,sites.length);
+      mesh.name=names[i];return mesh;
+    });
     sites.forEach(({x,y,angle,color,road},i)=>{
       const z=road?.024:.002;
       pose.position.set(x,z,-y);pose.rotation.y=(90-angle)*Math.PI/180;
@@ -520,14 +540,18 @@ export function buildVehicles(ctx,parent) {
       mesh.computeBoundingSphere();parent.add(mesh);
     }
   }
-  const bikes=new Kit(THREE,low);
-  locations.bikes.slice(0,low?2:3).forEach(([x,y,angle],i)=>{
-    bikes.begin(x,y,angle,-.105);
+  const bikes=pack?null:new Kit(THREE,low);
+  for(const [i,[x,y,angle]] of locations.bikes.slice(0,low?2:3).entries()){
+    await ctx.breathe();
     contacts.push([x,y,.002,angle,1.68,.51]);
+    if(pack)continue;
+    bikes.begin(x,y,angle,-.105);
     bikes.M.multiply(new THREE.Matrix4().makeTranslation(-.65,.005,0));
     motorbike(bikes,[[.18,.035,.022],[.017,.023,.027],[.03,.072,.106]][i]);
-  });
-  const bikeMesh=new THREE.Mesh(fixedParts(bikes),finish);
+  }
+  await ctx.breathe();
+  const bikesGeo=pack?cachedGeometry(THREE,pack,'Parked commuter motorcycles'):fixedParts(bikes);
+  const bikeMesh=new THREE.Mesh(bikesGeo,finish);
   bikeMesh.name='Parked commuter motorcycles';bikeMesh.castShadow=bikeMesh.receiveShadow=true;parent.add(bikeMesh);
   const contactMat=new THREE.ShaderMaterial({
     transparent:true,depthWrite:false,polygonOffset:true,polygonOffsetFactor:-1,

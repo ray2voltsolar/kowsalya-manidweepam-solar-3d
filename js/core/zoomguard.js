@@ -24,7 +24,7 @@
 // ============================================================================
 
 const CARDS = '#panel, #viewbar, #brand, #infocard, #legendFloat, #panelOpen, #toasts, #measureHint';
-const NO_ZOOM = '#panel, #loader';
+const NO_ZOOM = '#panel, #loader, #contextLost';
 const LABEL = '#labels .lbl';
 const OVERLAY_TOUCH = '#brand, #viewbar, #compass, #legendFloat, #scalebar, #attrib, #infocard, #measureHint, #panelOpen';
 const DRAG_PX = 6;                     // mouse: same tap/drag threshold as the canvas click handler in main.js
@@ -97,7 +97,7 @@ export function installZoomGuard({ target, onZoom } = {}) {
     const zout = k === '-' || k === '_' || c === 'NumpadSubtract' || c === 'Minus';
     if (!zin && !zout) return;
     e.preventDefault();
-    if (document.querySelector('#loader:not(.done)')) return;
+    if (document.querySelector('#loader:not(.done), #contextLost[open]')) return;
     const { cx, cy } = viewCentre();
     // ctrlKey:false so OrbitControls does not apply its ×10 pinch factor; 250 → ≈ 12 % dolly per press
     forward({ deltaX: 0, deltaMode: 0, screenX: cx, screenY: cy }, { deltaY: zin ? -250 : 250, ctrlKey: false, x: cx, y: cy });
@@ -138,7 +138,8 @@ export function installZoomGuard({ target, onZoom } = {}) {
     if (touch) touches.add(e.pointerId);
     const onLabel = !!closest(e.target, LABEL);
     if (onLabel || (touch && closest(e.target, OVERLAY_TOUCH))) {
-      pending.set(e.pointerId, { src: e, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, drag: onLabel });
+      const onTitle = closest(e.target, '#brand') && !closest(e.target, 'button');
+      pending.set(e.pointerId, { src: e, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, drag: onLabel || onTitle });
       // this finger joins a pinch: the other finger is on the scene, or also on a label / overlay
       // (a finger resting on the side panel / sheet does not count)
       if (touch && (sceneTouches.size > 0 || [...pending.values()].filter((p) => p.src.pointerType === 'touch').length > 1)) handOverTouches();

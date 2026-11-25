@@ -21,7 +21,7 @@ export function slab(ring, holes, z, scale = 1) {
   return g;
 }
 export function box(B,key,tint,x,y,z,w,d,h,rot=0) {
-  return B.add(key,boxUV(boxAt(x,y,z,w,d,h,rot),1),tint);
+  return B.add(key,boxAt(x,y,z,w,d,h,rot,true),tint);
 }
 export function bar(B,key,tint,a,b,width,height) {
   return B.add(key,boxUV(beam(V(...a),V(...b),width,height),1),tint);
