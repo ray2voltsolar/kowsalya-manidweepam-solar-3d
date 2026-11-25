@@ -1,0 +1,22 @@
+{
+ "note": "Esri World Imagery (WorldView-3, 15 Feb 2026). Plan-coordinate extent of each image: x east, y north, metres from SITE.originGeo. Image row 0 is the NORTH edge.",
+ "attribution": "Imagery \u00a9 Esri, Maxar, Earthstar Geographics",
+ "z19": {
+  "file": "assets/sat_z19.jpg",
+  "minX": -232.34,
+  "maxX": 204.98,
+  "minY": -224.66,
+  "maxY": 212.66,
+  "mpp": 0.28471,
+  "px": 1536
+ },
+ "z18": {
+  "file": "assets/sat_z18.jpg",
+  "minX": -523.88,
+  "maxX": 350.75,
+  "minY": -443.32,
+  "maxY": 431.31,
+  "mpp": 0.56942,
+  "px": 1536
+ }
+}
